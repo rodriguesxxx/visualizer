@@ -140,6 +140,7 @@ function App() {
   const beforeCardRef = useRef<HTMLDivElement>(null);
   const afterCardRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ pointerId: number; startX: number; startY: number; origin: Pan } | null>(null);
+  const dropDepthRef = useRef(0);
   const [viewMode, setViewMode] = useState<ViewMode>("compare");
   const [selectedClass, setSelectedClass] = useState<ClassName | "todas">("todas");
   const [detections, setDetections] = useState<Detection[]>(initialDetections);
@@ -156,6 +157,7 @@ function App() {
   const [analysisZoom, setAnalysisZoom] = useState(1);
   const [analysisPan, setAnalysisPan] = useState<Pan>({ x: 0, y: 0 });
   const [imageAspect, setImageAspect] = useState(1.55);
+  const [isDraggingImage, setIsDraggingImage] = useState(false);
   const beforeSize = useElementSize(beforeCardRef);
   const afterSize = useElementSize(afterCardRef);
   const [message, setMessage] = useState("Carregando metadados do treino v1...");
@@ -264,6 +266,11 @@ function App() {
   }, [analysisSurface.width, analysisSurface.height, analysisZoom]);
 
   const analyzeFile = async (file: File) => {
+    if (!file.type.startsWith("image/")) {
+      setMessage("Arquivo ignorado. Arraste ou selecione uma imagem.");
+      return;
+    }
+
     const localPreview = URL.createObjectURL(file);
     setImageSrc(localPreview);
     setIsAnalyzing(true);
@@ -297,6 +304,40 @@ function App() {
     }
   };
 
+  const startImageDrag = (event: React.DragEvent<HTMLElement>) => {
+    event.preventDefault();
+    if (isAnalyzing) return;
+    dropDepthRef.current += 1;
+    event.dataTransfer.dropEffect = "copy";
+    setIsDraggingImage(true);
+  };
+
+  const keepImageDrag = (event: React.DragEvent<HTMLElement>) => {
+    event.preventDefault();
+    if (!isAnalyzing) event.dataTransfer.dropEffect = "copy";
+  };
+
+  const stopImageDrag = (event: React.DragEvent<HTMLElement>) => {
+    event.preventDefault();
+    dropDepthRef.current = Math.max(0, dropDepthRef.current - 1);
+    if (dropDepthRef.current === 0) setIsDraggingImage(false);
+  };
+
+  const dropImage = (event: React.DragEvent<HTMLElement>) => {
+    event.preventDefault();
+    dropDepthRef.current = 0;
+    setIsDraggingImage(false);
+
+    if (isAnalyzing) return;
+    const file = Array.from(event.dataTransfer.files).find((item) => item.type.startsWith("image/"));
+    if (file) {
+      void analyzeFile(file);
+      return;
+    }
+
+    setMessage("Nenhuma imagem encontrada no arquivo arrastado.");
+  };
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -311,7 +352,17 @@ function App() {
       </header>
 
       <section className="dashboard-grid">
-        <article className="analysis-stage">
+        <article
+          className={`analysis-stage ${isDraggingImage ? "is-dragging-image" : ""}`}
+          onDragEnter={startImageDrag}
+          onDragOver={keepImageDrag}
+          onDragLeave={stopImageDrag}
+          onDrop={dropImage}
+        >
+          <div className="drop-overlay">
+            <ImageUp size={28} />
+            <span>Solte a imagem para analisar</span>
+          </div>
           <div className="panel-header">
             <div>
               <p className="eyebrow">Antes e depois</p>

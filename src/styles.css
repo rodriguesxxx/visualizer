@@ -129,7 +129,30 @@ h2 {
 }
 
 .analysis-stage {
+  position: relative;
   overflow: hidden;
+}
+
+.drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 12px;
+  border: 2px dashed rgba(244, 255, 248, 0.48);
+  background: rgba(7, 17, 13, 0.82);
+  color: #f4fff8;
+  font-size: 0.94rem;
+  font-weight: 900;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms ease;
+}
+
+.analysis-stage.is-dragging-image .drop-overlay {
+  opacity: 1;
 }
 
 .panel-header {
