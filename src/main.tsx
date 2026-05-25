@@ -4,6 +4,7 @@ import {
   Activity,
   BarChart3,
   Boxes,
+  ChevronDown,
   CheckCircle2,
   CircleDot,
   Eye,
@@ -158,6 +159,8 @@ function App() {
   const [analysisPan, setAnalysisPan] = useState<Pan>({ x: 0, y: 0 });
   const [imageAspect, setImageAspect] = useState(1.55);
   const [isDraggingImage, setIsDraggingImage] = useState(false);
+  const [isInstancesExpanded, setIsInstancesExpanded] = useState(false);
+  const [isArtifactsExpanded, setIsArtifactsExpanded] = useState(false);
   const beforeSize = useElementSize(beforeCardRef);
   const afterSize = useElementSize(afterCardRef);
   const [message, setMessage] = useState("Carregando metadados do treino v1...");
@@ -541,25 +544,58 @@ function App() {
 
       <section className="bottom-grid">
         <article className="data-panel instances-panel">
-          <PanelTitle icon={<ScanLine size={18} />} title="Instâncias detectadas" />
-          {isAnalyzing ? (
-            <div className="processing-state">Em processamento</div>
-          ) : (
-            <div className="instance-list">
-              {detections.map((detection) => (
-                <InstanceRow key={detection.id} detection={detection} />
-              ))}
+          <div className="panel-title-row">
+            <PanelTitle icon={<ScanLine size={18} />} title="Instâncias detectadas" />
+            <div className="panel-actions">
+              <span>{isAnalyzing ? "Processando" : `${detections.length} instâncias`}</span>
+              <button
+                aria-expanded={isInstancesExpanded}
+                aria-label={isInstancesExpanded ? "Recolher instâncias detectadas" : "Expandir instâncias detectadas"}
+                className="expand-button"
+                onClick={() => setIsInstancesExpanded((current) => !current)}
+                type="button"
+              >
+                <ChevronDown size={17} />
+              </button>
             </div>
+          </div>
+          {isInstancesExpanded && (
+            isAnalyzing ? (
+              <div className="processing-state">Em processamento</div>
+            ) : (
+              <div className="instance-list">
+                {detections.map((detection) => (
+                  <InstanceRow key={detection.id} detection={detection} />
+                ))}
+              </div>
+            )
           )}
         </article>
 
         <article className="data-panel">
-          <PanelTitle icon={<Layers3 size={18} />} title="Modelo e artefatos" />
-          <div className="model-summary">
-            <strong>{analysisModel}</strong>
-            <span>{latencyMs ? `Última inferência: ${(latencyMs / 1000).toFixed(2)}s` : "Aguardando upload"}</span>
+          <div className="panel-title-row">
+            <PanelTitle icon={<Layers3 size={18} />} title="Modelo e artefatos" />
+            <div className="panel-actions">
+              <button
+                aria-expanded={isArtifactsExpanded}
+                aria-label={isArtifactsExpanded ? "Recolher modelo e artefatos" : "Expandir modelo e artefatos"}
+                className="expand-button"
+                onClick={() => setIsArtifactsExpanded((current) => !current)}
+                type="button"
+              >
+                <ChevronDown size={17} />
+              </button>
+            </div>
           </div>
-          <ArtifactGrid artifacts={artifacts} />
+          {isArtifactsExpanded && (
+            <>
+              <div className="model-summary">
+                <strong>{analysisModel}</strong>
+                <span>{latencyMs ? `Última inferência: ${(latencyMs / 1000).toFixed(2)}s` : "Aguardando upload"}</span>
+              </div>
+              <ArtifactGrid artifacts={artifacts} />
+            </>
+          )}
         </article>
       </section>
     </main>
@@ -791,6 +827,7 @@ function ArtifactGrid({ artifacts }: { artifacts: TrainingArtifact[] }) {
 
 function InstanceRow({ detection }: { detection: Detection }) {
   const theme = classStyle[detection.className];
+
   return (
     <div className="instance-row">
       <div className="chip" style={{ borderColor: theme.color }}>

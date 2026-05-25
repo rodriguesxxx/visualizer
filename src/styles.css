@@ -116,6 +116,7 @@ h2 {
 
 .bottom-grid {
   grid-template-columns: minmax(0, 1.2fr) minmax(360px, 0.8fr);
+  align-items: start;
   margin-top: 20px;
 }
 
@@ -577,6 +578,28 @@ h2 {
   margin-bottom: 16px;
 }
 
+.panel-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.panel-title-row .panel-title {
+  margin-bottom: 0;
+}
+
+.panel-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: #9dbbac;
+  font-size: 0.78rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
 .panel-title svg {
   color: #69c8ff;
 }
@@ -705,6 +728,7 @@ h2 {
 }
 
 .instances-panel {
+  align-self: start;
   min-width: 0;
   overflow: hidden;
 }
@@ -724,6 +748,26 @@ h2 {
   border: 1px solid rgba(244, 255, 248, 0.1);
   border-radius: 8px;
   background: rgba(244, 255, 248, 0.06);
+}
+
+.expand-button {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(244, 255, 248, 0.14);
+  border-radius: 8px;
+  background: rgba(244, 255, 248, 0.08);
+  color: #f4fff8;
+  cursor: pointer;
+}
+
+.expand-button svg {
+  transition: transform 160ms ease;
+}
+
+.expand-button[aria-expanded="true"] svg {
+  transform: rotate(180deg);
 }
 
 .chip {
@@ -747,6 +791,7 @@ h2 {
 
 .instance-row strong {
   font-size: 1.45rem;
+  line-height: 1;
 }
 
 .instance-row small {
