@@ -164,6 +164,12 @@ h2 {
   padding: 20px;
 }
 
+.upload-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .upload-button {
   display: inline-flex;
   align-items: center;
@@ -179,7 +185,17 @@ h2 {
   font-weight: 900;
 }
 
-.upload-button.disabled {
+.upload-button.secondary {
+  border: 1px solid rgba(244, 255, 248, 0.2);
+  background: rgba(244, 255, 248, 0.08);
+  color: #f4fff8;
+}
+
+.upload-button.camera-action {
+  display: none;
+}
+
+.upload-actions.disabled .upload-button {
   cursor: wait;
   opacity: 0.72;
 }
@@ -878,6 +894,21 @@ h2 {
 
   .live-pill {
     white-space: normal;
+  }
+
+  .upload-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    width: 100%;
+  }
+
+  .upload-button.camera-action {
+    display: inline-flex;
+  }
+
+  .upload-button {
+    min-width: 0;
+    width: 100%;
   }
 
   .image-workbench {

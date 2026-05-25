@@ -4,11 +4,13 @@ import {
   Activity,
   BarChart3,
   Boxes,
+  Camera,
   ChevronDown,
   CheckCircle2,
   CircleDot,
   Eye,
   ImageUp,
+  Images,
   Layers3,
   Leaf,
   Minus,
@@ -92,6 +94,9 @@ const API_BASE = (
   (import.meta as unknown as { env?: { VITE_MODEL_API_URL?: string } }).env?.VITE_MODEL_API_URL ??
   "http://localhost:8000"
 ).replace(/\/$/, "");
+const inferenceTimeoutMs = 90_000;
+const maxConvertedImageSide = 1920;
+const jpegQuality = 0.88;
 
 const initialDetections: Detection[] = [
   {
@@ -135,6 +140,124 @@ const initialTrainingMetrics: TrainingMetric[] = [
 const classStyle = {
   folha: { label: "Folha", color: "#42f58d", soft: "rgba(66, 245, 141, .25)" },
   fruto: { label: "Fruto", color: "#ff5c7a", soft: "rgba(255, 92, 122, .25)" }
+};
+
+const imageAccept = "image/*,.heic,.heif";
+const heicExtensions = [".heic", ".heif"];
+
+const isSupportedImageFile = (file: File) => {
+  const filename = file.name.toLowerCase();
+  return file.type.startsWith("image/") || heicExtensions.some((extension) => filename.endsWith(extension));
+};
+
+const isHeicImageFile = (file: File) => {
+  const filename = file.name.toLowerCase();
+  return file.type === "image/heic" || file.type === "image/heif" || heicExtensions.some((extension) => filename.endsWith(extension));
+};
+
+const getJpegFilename = (filename: string) => filename.replace(/\.(heic|heif)$/i, ".jpg") || "imagem.jpg";
+
+const loadImageElement = (url: string) =>
+  new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("Não foi possível preparar o JPG convertido."));
+    image.src = url;
+  });
+
+const canvasToJpegBlob = (canvas: HTMLCanvasElement) =>
+  new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => {
+        if (blob) {
+          resolve(blob);
+          return;
+        }
+
+        reject(new Error("Não foi possível gerar o JPG convertido."));
+      },
+      "image/jpeg",
+      jpegQuality
+    );
+  });
+
+const normalizeJpegBlob = async (blob: Blob, filename: string) => {
+  let source: ImageBitmap | HTMLImageElement | null = null;
+  let objectUrl: string | null = null;
+
+  try {
+    try {
+      source = await createImageBitmap(blob);
+    } catch (error) {
+      objectUrl = URL.createObjectURL(blob);
+      source = await loadImageElement(objectUrl);
+    }
+
+    const scale = Math.min(1, maxConvertedImageSide / Math.max(source.width, source.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(source.width * scale));
+    canvas.height = Math.max(1, Math.round(source.height * scale));
+
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Não foi possível preparar o JPG convertido.");
+
+    context.drawImage(source, 0, 0, canvas.width, canvas.height);
+    const jpegBlob = await canvasToJpegBlob(canvas);
+    return new File([jpegBlob], filename, { type: "image/jpeg" });
+  } finally {
+    if (source && "close" in source && typeof source.close === "function") source.close();
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+  }
+};
+
+const convertHeicToJpeg = async (file: File) => {
+  try {
+    const { default: heic2any } = await import("heic2any");
+    const result = await heic2any({ blob: file, toType: "image/jpeg", quality: jpegQuality });
+    const jpegBlob = Array.isArray(result) ? result[0] : result;
+    if (!jpegBlob) throw new Error("HEIC sem imagem válida.");
+    return normalizeJpegBlob(jpegBlob, getJpegFilename(file.name));
+  } catch (error) {
+    throw new Error("Não foi possível converter HEIC para JPG.");
+  }
+};
+
+const prepareImageFileForUpload = (file: File) => {
+  if (!isHeicImageFile(file)) return Promise.resolve(file);
+  return convertHeicToJpeg(file);
+};
+
+const formatFileSize = (bytes: number) => {
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+};
+
+const analyzeImageRequest = async (form: FormData) => {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), inferenceTimeoutMs);
+
+  try {
+    return await fetch(`${API_BASE}/api/v1/inference/analyze?confidence=0.25&iou=0.7`, {
+      method: "POST",
+      body: form,
+      signal: controller.signal
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("A API demorou mais de 90s para responder à inferência.");
+    }
+
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+};
+
+const getAnalyzeErrorMessage = (error: unknown) => {
+  const errorMessage = error instanceof Error ? error.message : "";
+  if (errorMessage.includes("converter HEIC")) return errorMessage;
+  if (errorMessage.includes("demorou mais de 90s")) return errorMessage;
+  return `Não foi possível analisar a imagem. Verifique se a API está acessível em ${API_BASE}.`;
 };
 
 function App() {
@@ -269,24 +392,24 @@ function App() {
   }, [analysisSurface.width, analysisSurface.height, analysisZoom]);
 
   const analyzeFile = async (file: File) => {
-    if (!file.type.startsWith("image/")) {
-      setMessage("Arquivo ignorado. Arraste ou selecione uma imagem.");
+    if (!isSupportedImageFile(file)) {
+      setMessage("Arquivo ignorado. Arraste ou selecione uma imagem JPG, PNG, HEIC ou HEIF.");
       return;
     }
 
-    const localPreview = URL.createObjectURL(file);
-    setImageSrc(localPreview);
     setIsAnalyzing(true);
-    setMessage("Enviando imagem para inferência na API do modelo...");
+    setMessage(isHeicImageFile(file) ? "Convertendo HEIC para JPG..." : "Enviando imagem para inferência na API do modelo...");
 
     try {
-      const form = new FormData();
-      form.append("file", file);
+      const uploadFile = await prepareImageFileForUpload(file);
+      const localPreview = URL.createObjectURL(uploadFile);
+      setImageSrc(localPreview);
+      setMessage(`Enviando ${isHeicImageFile(file) ? "JPG convertido" : "imagem"} (${formatFileSize(uploadFile.size)}) para inferência...`);
 
-      const response = await fetch(`${API_BASE}/api/v1/inference/analyze?confidence=0.25&iou=0.7`, {
-        method: "POST",
-        body: form
-      });
+      const form = new FormData();
+      form.append("file", uploadFile, uploadFile.name);
+
+      const response = await analyzeImageRequest(form);
 
       if (!response.ok) {
         throw new Error(await response.text());
@@ -301,10 +424,16 @@ function App() {
       setMessage(`Inferência concluída em ${(payload.latencyMs / 1000).toFixed(2)}s`);
     } catch (error) {
       setApiStatus("offline");
-      setMessage(`Não foi possível analisar a imagem. Verifique se a API está acessível em ${API_BASE}.`);
+      setMessage(getAnalyzeErrorMessage(error));
     } finally {
       setIsAnalyzing(false);
     }
+  };
+
+  const handleImageInput = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) void analyzeFile(file);
+    event.currentTarget.value = "";
   };
 
   const startImageDrag = (event: React.DragEvent<HTMLElement>) => {
@@ -332,7 +461,7 @@ function App() {
     setIsDraggingImage(false);
 
     if (isAnalyzing) return;
-    const file = Array.from(event.dataTransfer.files).find((item) => item.type.startsWith("image/"));
+    const file = Array.from(event.dataTransfer.files).find(isSupportedImageFile);
     if (file) {
       void analyzeFile(file);
       return;
@@ -372,20 +501,18 @@ function App() {
               <h2>Segmentação de folhas e frutos</h2>
               <p className="api-message">{message}</p>
             </div>
-            <label className={`upload-button ${isAnalyzing ? "disabled" : ""}`}>
-              <ImageUp size={17} />
-              {isAnalyzing ? "Analisando" : "Imagem"}
-              <input
-                disabled={isAnalyzing}
-                type="file"
-                accept="image/*"
-                onChange={(event) => {
-                  const file = event.target.files?.[0];
-                  if (file) void analyzeFile(file);
-                  event.currentTarget.value = "";
-                }}
-              />
-            </label>
+            <div className={`upload-actions ${isAnalyzing ? "disabled" : ""}`} aria-label="Selecionar imagem">
+              <label className="upload-button camera-action">
+                <Camera size={17} />
+                {isAnalyzing ? "Analisando" : "Câmera"}
+                <input disabled={isAnalyzing} type="file" accept={imageAccept} capture="environment" onChange={handleImageInput} />
+              </label>
+              <label className="upload-button secondary">
+                <Images size={17} />
+                Galeria
+                <input disabled={isAnalyzing} type="file" accept={imageAccept} onChange={handleImageInput} />
+              </label>
+            </div>
           </div>
 
           <div className={`image-workbench ${viewMode}`}>
