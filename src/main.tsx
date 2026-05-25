@@ -80,6 +80,10 @@ type ApiTrainingMetric = {
   classLoss: number;
 };
 
+type ApiModelInfo = {
+  name?: string;
+};
+
 type Size = {
   width: number;
   height: number;
@@ -95,8 +99,13 @@ const API_BASE = (
   "http://localhost:8000"
 ).replace(/\/$/, "");
 const inferenceTimeoutMs = 90_000;
-const maxConvertedImageSide = 1920;
-const jpegQuality = 0.88;
+const maxConvertedImageSide = 1280;
+const jpegQuality = 0.82;
+const apiCacheTtlMs = 12 * 60 * 60 * 1000;
+const apiCachePrefix = "plant-ai-api-cache";
+const artifactImageCacheName = "plant-ai-artifact-images-v1";
+const pendingJsonRequests = new Map<string, Promise<unknown>>();
+const pendingArtifactImageRequests = new Map<string, Promise<string>>();
 
 const initialDetections: Detection[] = [
   {
@@ -227,6 +236,73 @@ const prepareImageFileForUpload = (file: File) => {
   return convertHeicToJpeg(file);
 };
 
+const readJsonCache = <T,>(key: string): T | null => {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return null;
+    const cached = JSON.parse(raw) as { timestamp: number; value: T };
+    if (Date.now() - cached.timestamp > apiCacheTtlMs) return null;
+    return cached.value;
+  } catch (error) {
+    return null;
+  }
+};
+
+const writeJsonCache = <T,>(key: string, value: T) => {
+  try {
+    window.localStorage.setItem(key, JSON.stringify({ timestamp: Date.now(), value }));
+  } catch (error) {
+    // Storage can fail in private mode or when quota is exceeded; network fallback remains valid.
+  }
+};
+
+const fetchCachedJson = async <T,>(cacheKey: string, url: string) => {
+  const key = `${apiCachePrefix}:${cacheKey}`;
+  const cached = readJsonCache<T>(key);
+  if (cached) return cached;
+
+  const pending = pendingJsonRequests.get(key) as Promise<T> | undefined;
+  if (pending) return pending;
+
+  const request = fetch(url, { cache: "force-cache" })
+    .then(async (response) => {
+      if (!response.ok) throw new Error(`Falha ao carregar ${cacheKey}`);
+      const value = (await response.json()) as T;
+      writeJsonCache(key, value);
+      return value;
+    })
+    .finally(() => pendingJsonRequests.delete(key));
+
+  pendingJsonRequests.set(key, request);
+  return request;
+};
+
+const getCachedArtifactImageUrl = async (url: string) => {
+  if (!("caches" in window)) return url;
+
+  const pending = pendingArtifactImageRequests.get(url);
+  if (pending) return pending;
+
+  const request = (async () => {
+    try {
+      const cache = await caches.open(artifactImageCacheName);
+      const cached = await cache.match(url);
+      if (cached) return URL.createObjectURL(await cached.blob());
+
+      const response = await fetch(url, { cache: "force-cache" });
+      if (!response.ok) return url;
+
+      await cache.put(url, response.clone());
+      return URL.createObjectURL(await response.blob());
+    } catch (error) {
+      return url;
+    }
+  })().finally(() => pendingArtifactImageRequests.delete(url));
+
+  pendingArtifactImageRequests.set(url, request);
+  return request;
+};
+
 const formatFileSize = (bytes: number) => {
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
@@ -291,19 +367,11 @@ function App() {
   useEffect(() => {
     const loadApiData = async () => {
       try {
-        const [infoResponse, metricsResponse, artifactsResponse] = await Promise.all([
-          fetch(`${API_BASE}/api/v1/model/info`),
-          fetch(`${API_BASE}/api/v1/training/metrics`),
-          fetch(`${API_BASE}/api/v1/training/artifacts`)
+        const [info, metrics, artifactPayload] = await Promise.all([
+          fetchCachedJson<ApiModelInfo>("model-info", `${API_BASE}/api/v1/model/info`),
+          fetchCachedJson<{ series: ApiTrainingMetric[] }>("training-metrics", `${API_BASE}/api/v1/training/metrics`),
+          fetchCachedJson<{ artifacts: TrainingArtifact[] }>("training-artifacts", `${API_BASE}/api/v1/training/artifacts`)
         ]);
-
-        if (!infoResponse.ok || !metricsResponse.ok || !artifactsResponse.ok) {
-          throw new Error("Falha ao carregar endpoints do modelo");
-        }
-
-        const info = await infoResponse.json();
-        const metrics = (await metricsResponse.json()) as { series: ApiTrainingMetric[] };
-        const artifactPayload = (await artifactsResponse.json()) as { artifacts: TrainingArtifact[] };
 
         setAnalysisModel(info.name ?? "Plant.AI YOLOv8-seg v1");
         setTrainingMetrics(metrics.series.map(toTrainingMetric));
@@ -943,12 +1011,41 @@ function ArtifactGrid({ artifacts }: { artifacts: TrainingArtifact[] }) {
   return (
     <div className="artifact-grid">
       {selected.map((artifact) => (
-        <a href={absoluteApiUrl(artifact.url)} target="_blank" rel="noreferrer" key={artifact.id}>
-          <img src={absoluteApiUrl(artifact.url)} alt={artifact.file} />
-          <span>{artifact.id.replace(/_/g, " ")}</span>
-        </a>
+        <CachedArtifactLink artifact={artifact} key={artifact.id} />
       ))}
     </div>
+  );
+}
+
+function CachedArtifactLink({ artifact }: { artifact: TrainingArtifact }) {
+  const originalUrl = absoluteApiUrl(artifact.url);
+  const [imageUrl, setImageUrl] = useState(originalUrl);
+
+  useEffect(() => {
+    let objectUrl: string | null = null;
+    let isActive = true;
+
+    void getCachedArtifactImageUrl(originalUrl).then((cachedUrl) => {
+      if (!isActive) {
+        if (cachedUrl.startsWith("blob:")) URL.revokeObjectURL(cachedUrl);
+        return;
+      }
+
+      objectUrl = cachedUrl.startsWith("blob:") ? cachedUrl : null;
+      setImageUrl(cachedUrl);
+    });
+
+    return () => {
+      isActive = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [originalUrl]);
+
+  return (
+    <a href={originalUrl} target="_blank" rel="noreferrer">
+      <img src={imageUrl} alt={artifact.file} loading="lazy" />
+      <span>{artifact.id.replace(/_/g, " ")}</span>
+    </a>
   );
 }
 
