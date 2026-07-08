@@ -126,7 +126,8 @@ const apiCachePrefix = "plant-ai-api-cache";
 const artifactImageCacheName = "plant-ai-artifact-images-v1";
 const analysisHistoryStorageKey = "plant-ai-analysis-history-v1";
 const maxAnalysisHistoryItems = 100;
-const analysisReportTemplateUrl = `${publicAssetBaseUrl}reports/analysis-history-template.csv`;
+const analysisReportTemplateCsvUrl = `${publicAssetBaseUrl}reports/analysis-history-template.csv`;
+const analysisReportTemplateXlsxUrl = `${publicAssetBaseUrl}reports/analysis-history-template.xlsx`;
 const analysisReportHeaders = [
   "plant_id",
   "analysis_id",
@@ -142,6 +143,7 @@ const analysisReportHeaders = [
   "model",
   "latency_ms"
 ];
+const spreadsheetXmlNamespace = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 const pendingJsonRequests = new Map<string, Promise<unknown>>();
 const pendingArtifactImageRequests = new Map<string, Promise<string>>();
 
@@ -454,21 +456,298 @@ const reportColumnGetters: Record<string, (item: AnalysisHistoryItem) => string 
   leaf_count: (item) => item.leafCount,
   fruit_count: (item) => item.fruitCount,
   total_detections: (item) => item.totalDetections,
-  average_confidence: (item) => item.averageConfidence.toFixed(4),
+  average_confidence: (item) => Number(item.averageConfidence.toFixed(4)),
   model: (item) => item.model,
   latency_ms: (item) => item.latencyMs
 };
 
 const normalizeReportHeaderColumn = (column: string) => column.trim().replace(/^"|"$/g, "");
+const getReportColumns = (header: string) => header.split(",").map(normalizeReportHeaderColumn);
+const getReportValue = (column: string, item: AnalysisHistoryItem) => reportColumnGetters[column]?.(item) ?? "";
 
 const escapeCsvValue = (value: string | number | null | undefined) => {
   const text = value === null || value === undefined ? "" : String(value);
   return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, "\"\"")}"` : text;
 };
 
+const encodeUtf8 = (value: string) => new TextEncoder().encode(value);
+const decodeUtf8 = (value: Uint8Array) => new TextDecoder().decode(value);
+
+const xmlEscape = (value: string | number | null | undefined) =>
+  String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+
+const crc32Table = Array.from({ length: 256 }, (_, index) => {
+  let value = index;
+  for (let bit = 0; bit < 8; bit += 1) {
+    value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+  }
+  return value >>> 0;
+});
+
+const crc32 = (bytes: Uint8Array) => {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc = crc32Table[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+};
+
+const concatBytes = (parts: Uint8Array[]) => {
+  const totalLength = parts.reduce((total, part) => total + part.length, 0);
+  const output = new Uint8Array(totalLength);
+  let offset = 0;
+
+  for (const part of parts) {
+    output.set(part, offset);
+    offset += part.length;
+  }
+
+  return output;
+};
+
+const writeUint16 = (target: Uint8Array, offset: number, value: number) => {
+  target[offset] = value & 0xff;
+  target[offset + 1] = (value >>> 8) & 0xff;
+};
+
+const writeUint32 = (target: Uint8Array, offset: number, value: number) => {
+  target[offset] = value & 0xff;
+  target[offset + 1] = (value >>> 8) & 0xff;
+  target[offset + 2] = (value >>> 16) & 0xff;
+  target[offset + 3] = (value >>> 24) & 0xff;
+};
+
+const createStoredZip = (files: Map<string, Uint8Array>) => {
+  const localParts: Uint8Array[] = [];
+  const centralParts: Uint8Array[] = [];
+  let localOffset = 0;
+
+  for (const [filename, content] of files) {
+    const nameBytes = encodeUtf8(filename);
+    const checksum = crc32(content);
+    const localHeader = new Uint8Array(30 + nameBytes.length);
+    writeUint32(localHeader, 0, 0x04034b50);
+    writeUint16(localHeader, 4, 20);
+    writeUint16(localHeader, 6, 0);
+    writeUint16(localHeader, 8, 0);
+    writeUint16(localHeader, 10, 0);
+    writeUint16(localHeader, 12, 0);
+    writeUint32(localHeader, 14, checksum);
+    writeUint32(localHeader, 18, content.length);
+    writeUint32(localHeader, 22, content.length);
+    writeUint16(localHeader, 26, nameBytes.length);
+    writeUint16(localHeader, 28, 0);
+    localHeader.set(nameBytes, 30);
+    localParts.push(localHeader, content);
+
+    const centralHeader = new Uint8Array(46 + nameBytes.length);
+    writeUint32(centralHeader, 0, 0x02014b50);
+    writeUint16(centralHeader, 4, 20);
+    writeUint16(centralHeader, 6, 20);
+    writeUint16(centralHeader, 8, 0);
+    writeUint16(centralHeader, 10, 0);
+    writeUint16(centralHeader, 12, 0);
+    writeUint16(centralHeader, 14, 0);
+    writeUint32(centralHeader, 16, checksum);
+    writeUint32(centralHeader, 20, content.length);
+    writeUint32(centralHeader, 24, content.length);
+    writeUint16(centralHeader, 28, nameBytes.length);
+    writeUint16(centralHeader, 30, 0);
+    writeUint16(centralHeader, 32, 0);
+    writeUint16(centralHeader, 34, 0);
+    writeUint16(centralHeader, 36, 0);
+    writeUint32(centralHeader, 38, 0);
+    writeUint32(centralHeader, 42, localOffset);
+    centralHeader.set(nameBytes, 46);
+    centralParts.push(centralHeader);
+
+    localOffset += localHeader.length + content.length;
+  }
+
+  const centralDirectory = concatBytes(centralParts);
+  const endRecord = new Uint8Array(22);
+  writeUint32(endRecord, 0, 0x06054b50);
+  writeUint16(endRecord, 4, 0);
+  writeUint16(endRecord, 6, 0);
+  writeUint16(endRecord, 8, files.size);
+  writeUint16(endRecord, 10, files.size);
+  writeUint32(endRecord, 12, centralDirectory.length);
+  writeUint32(endRecord, 16, localOffset);
+  writeUint16(endRecord, 20, 0);
+
+  return concatBytes([...localParts, centralDirectory, endRecord]);
+};
+
+const readStoredZip = (buffer: ArrayBuffer) => {
+  const bytes = new Uint8Array(buffer);
+  const view = new DataView(buffer);
+  let endRecordOffset = -1;
+  const minOffset = Math.max(0, bytes.length - 65_557);
+
+  for (let offset = bytes.length - 22; offset >= minOffset; offset -= 1) {
+    if (view.getUint32(offset, true) === 0x06054b50) {
+      endRecordOffset = offset;
+      break;
+    }
+  }
+
+  if (endRecordOffset < 0) throw new Error("Template Excel inválido.");
+
+  const entries = view.getUint16(endRecordOffset + 10, true);
+  let centralOffset = view.getUint32(endRecordOffset + 16, true);
+  const files = new Map<string, Uint8Array>();
+
+  for (let index = 0; index < entries; index += 1) {
+    if (view.getUint32(centralOffset, true) !== 0x02014b50) throw new Error("Template Excel inválido.");
+
+    const compressionMethod = view.getUint16(centralOffset + 10, true);
+    const compressedSize = view.getUint32(centralOffset + 20, true);
+    const filenameLength = view.getUint16(centralOffset + 28, true);
+    const extraLength = view.getUint16(centralOffset + 30, true);
+    const commentLength = view.getUint16(centralOffset + 32, true);
+    const localHeaderOffset = view.getUint32(centralOffset + 42, true);
+    const filename = decodeUtf8(bytes.slice(centralOffset + 46, centralOffset + 46 + filenameLength));
+    const localFilenameLength = view.getUint16(localHeaderOffset + 26, true);
+    const localExtraLength = view.getUint16(localHeaderOffset + 28, true);
+    const dataOffset = localHeaderOffset + 30 + localFilenameLength + localExtraLength;
+
+    if (compressionMethod !== 0) throw new Error("A base Excel precisa estar em ZIP sem compressão.");
+
+    files.set(filename, bytes.slice(dataOffset, dataOffset + compressedSize));
+    centralOffset += 46 + filenameLength + extraLength + commentLength;
+  }
+
+  return files;
+};
+
+const columnNameFromIndex = (index: number) => {
+  let dividend = index + 1;
+  let columnName = "";
+
+  while (dividend > 0) {
+    const modulo = (dividend - 1) % 26;
+    columnName = String.fromCharCode(65 + modulo) + columnName;
+    dividend = Math.floor((dividend - modulo) / 26);
+  }
+
+  return columnName;
+};
+
+const buildWorksheetCellXml = (value: string | number | null | undefined, cellReference: string) => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return `<c r="${cellReference}"><v>${value}</v></c>`;
+  }
+
+  return `<c r="${cellReference}" t="inlineStr"><is><t>${xmlEscape(value)}</t></is></c>`;
+};
+
+const buildAnalysisWorksheetXml = (items: AnalysisHistoryItem[]) => {
+  const rows = [
+    analysisReportHeaders,
+    ...items.map((item) => analysisReportHeaders.map((column) => getReportValue(column, item)))
+  ];
+  const lastColumn = columnNameFromIndex(analysisReportHeaders.length - 1);
+  const sheetData = rows
+    .map((row, rowIndex) => {
+      const rowNumber = rowIndex + 1;
+      const cells = row
+        .map((value, columnIndex) => buildWorksheetCellXml(value, `${columnNameFromIndex(columnIndex)}${rowNumber}`))
+        .join("");
+      return `<row r="${rowNumber}">${cells}</row>`;
+    })
+    .join("");
+
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="${spreadsheetXmlNamespace}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <dimension ref="A1:${lastColumn}${rows.length}" />
+  <sheetViews><sheetView workbookViewId="0" /></sheetViews>
+  <sheetFormatPr defaultRowHeight="15" />
+  <cols>
+    <col min="1" max="3" width="24" customWidth="1" />
+    <col min="4" max="4" width="32" customWidth="1" />
+    <col min="5" max="13" width="18" customWidth="1" />
+  </cols>
+  <sheetData>${sheetData}</sheetData>
+</worksheet>`;
+};
+
+const createAnalysisWorkbookFiles = (worksheetXml: string) =>
+  new Map<string, Uint8Array>([
+    [
+      "[Content_Types].xml",
+      encodeUtf8(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml" />
+  <Default Extension="xml" ContentType="application/xml" />
+  <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml" />
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml" />
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml" />
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml" />
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml" />
+</Types>`)
+    ],
+    [
+      "_rels/.rels",
+      encodeUtf8(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml" />
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml" />
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml" />
+</Relationships>`)
+    ],
+    [
+      "docProps/core.xml",
+      encodeUtf8(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <dc:creator>Plant.AI Visualizer</dc:creator>
+  <cp:lastModifiedBy>Plant.AI Visualizer</cp:lastModifiedBy>
+  <dcterms:created xsi:type="dcterms:W3CDTF">2026-07-08T00:00:00Z</dcterms:created>
+  <dcterms:modified xsi:type="dcterms:W3CDTF">2026-07-08T00:00:00Z</dcterms:modified>
+</cp:coreProperties>`)
+    ],
+    [
+      "docProps/app.xml",
+      encodeUtf8(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">
+  <Application>Plant.AI Visualizer</Application>
+</Properties>`)
+    ],
+    [
+      "xl/workbook.xml",
+      encodeUtf8(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="${spreadsheetXmlNamespace}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets><sheet name="Historico" sheetId="1" r:id="rId1" /></sheets>
+</workbook>`)
+    ],
+    [
+      "xl/_rels/workbook.xml.rels",
+      encodeUtf8(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml" />
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml" />
+</Relationships>`)
+    ],
+    [
+      "xl/styles.xml",
+      encodeUtf8(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="${spreadsheetXmlNamespace}">
+  <fonts count="1"><font><sz val="11" /><name val="Calibri" /></font></fonts>
+  <fills count="1"><fill><patternFill patternType="none" /></fill></fills>
+  <borders count="1"><border><left /><right /><top /><bottom /><diagonal /></border></borders>
+  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" /></cellStyleXfs>
+  <cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" /></cellXfs>
+</styleSheet>`)
+    ],
+    ["xl/worksheets/sheet1.xml", encodeUtf8(worksheetXml)]
+  ]);
+
 const getAnalysisReportTemplateHeader = async () => {
   try {
-    const response = await fetch(analysisReportTemplateUrl, { cache: "no-cache" });
+    const response = await fetch(analysisReportTemplateCsvUrl, { cache: "no-cache" });
     if (response.ok) {
       const template = await response.text();
       const header = template.split(/\r?\n/).find((line) => line.trim());
@@ -483,16 +762,15 @@ const getAnalysisReportTemplateHeader = async () => {
 
 const buildAnalysisHistoryCsv = async (items: AnalysisHistoryItem[]) => {
   const header = await getAnalysisReportTemplateHeader();
-  const columns = header.split(",").map(normalizeReportHeaderColumn);
+  const columns = getReportColumns(header);
   const rows = items.map((item) =>
-    columns.map((column) => escapeCsvValue(reportColumnGetters[column]?.(item) ?? "")).join(",")
+    columns.map((column) => escapeCsvValue(getReportValue(column, item))).join(",")
   );
 
   return `\uFEFF${[header, ...rows].join("\r\n")}\r\n`;
 };
 
-const downloadCsvFile = (filename: string, csv: string) => {
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+const downloadBlobFile = (filename: string, blob: Blob) => {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
 
@@ -507,7 +785,33 @@ const downloadCsvFile = (filename: string, csv: string) => {
 const exportAnalysisHistoryCsv = async (items: AnalysisHistoryItem[]) => {
   const csv = await buildAnalysisHistoryCsv(items);
   const date = new Date().toISOString().slice(0, 10);
-  downloadCsvFile(`plant-ai-historico-analises-${date}.csv`, csv);
+  downloadBlobFile(`plant-ai-historico-analises-${date}.csv`, new Blob([csv], { type: "text/csv;charset=utf-8" }));
+};
+
+const getAnalysisWorkbookTemplateFiles = async () => {
+  try {
+    const response = await fetch(analysisReportTemplateXlsxUrl, { cache: "no-cache" });
+    if (response.ok) return readStoredZip(await response.arrayBuffer());
+  } catch (error) {
+    // The Excel report can still be generated from the built-in workbook structure.
+  }
+
+  return createAnalysisWorkbookFiles(buildAnalysisWorksheetXml([]));
+};
+
+const buildAnalysisHistoryXlsx = async (items: AnalysisHistoryItem[]) => {
+  const files = await getAnalysisWorkbookTemplateFiles();
+  files.set("xl/worksheets/sheet1.xml", encodeUtf8(buildAnalysisWorksheetXml(items)));
+  return createStoredZip(files);
+};
+
+const exportAnalysisHistoryXlsx = async (items: AnalysisHistoryItem[]) => {
+  const workbook = await buildAnalysisHistoryXlsx(items);
+  const date = new Date().toISOString().slice(0, 10);
+  downloadBlobFile(
+    `plant-ai-historico-analises-${date}.xlsx`,
+    new Blob([workbook], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" })
+  );
 };
 
 const analyzeImageRequest = async (form: FormData) => {
@@ -659,17 +963,21 @@ function App() {
     setHistoryMessage(wasSaved ? `Análise ${item.plantId} salva no navegador.` : "Análise registrada apenas nesta sessão.");
   };
 
-  const handleExportHistory = async () => {
+  const handleExportHistory = async (format: "csv" | "xlsx") => {
     if (!analysisHistory.length || isExportingHistory) return;
 
     setIsExportingHistory(true);
-    setHistoryMessage("Montando planilha...");
+    setHistoryMessage(format === "xlsx" ? "Montando Excel..." : "Montando CSV...");
 
     try {
-      await exportAnalysisHistoryCsv(analysisHistory);
-      setHistoryMessage(`Planilha gerada com ${analysisHistory.length} análises.`);
+      if (format === "xlsx") {
+        await exportAnalysisHistoryXlsx(analysisHistory);
+      } else {
+        await exportAnalysisHistoryCsv(analysisHistory);
+      }
+      setHistoryMessage(`${format === "xlsx" ? "Excel" : "CSV"} gerado com ${analysisHistory.length} análises.`);
     } catch (error) {
-      setHistoryMessage("Não foi possível gerar a planilha.");
+      setHistoryMessage(`Não foi possível gerar o ${format === "xlsx" ? "Excel" : "CSV"}.`);
     } finally {
       setIsExportingHistory(false);
     }
@@ -974,9 +1282,11 @@ function App() {
             history={analysisHistory}
             isExporting={isExportingHistory}
             status={historyMessage}
-            templateUrl={analysisReportTemplateUrl}
+            templateCsvUrl={analysisReportTemplateCsvUrl}
+            templateXlsxUrl={analysisReportTemplateXlsxUrl}
             onClear={clearAnalysisHistory}
-            onExport={handleExportHistory}
+            onExportCsv={() => handleExportHistory("csv")}
+            onExportXlsx={() => handleExportHistory("xlsx")}
           />
         </aside>
       </section>
@@ -1045,16 +1355,20 @@ function AnalysisHistoryPanel({
   history,
   isExporting,
   status,
-  templateUrl,
+  templateCsvUrl,
+  templateXlsxUrl,
   onClear,
-  onExport
+  onExportCsv,
+  onExportXlsx
 }: {
   history: AnalysisHistoryItem[];
   isExporting: boolean;
   status: string;
-  templateUrl: string;
+  templateCsvUrl: string;
+  templateXlsxUrl: string;
   onClear: () => void;
-  onExport: () => void;
+  onExportCsv: () => void;
+  onExportXlsx: () => void;
 }) {
   const savedLabel = `${history.length} ${history.length === 1 ? "salva" : "salvas"}`;
   const latestItems = history.slice(0, 3);
@@ -1067,14 +1381,14 @@ function AnalysisHistoryPanel({
       </div>
 
       <div className="history-actions">
-        <button className="report-action primary" disabled={!history.length || isExporting} onClick={onExport} type="button">
-          <Download size={16} />
-          {isExporting ? "Gerando" : "Exportar CSV"}
-        </button>
-        <a className="report-action" href={templateUrl} rel="noreferrer" target="_blank">
+        <button className="report-action primary" disabled={!history.length || isExporting} onClick={onExportXlsx} type="button">
           <FileSpreadsheet size={16} />
-          Base CSV
-        </a>
+          {isExporting ? "Gerando" : "Exportar Excel"}
+        </button>
+        <button className="report-action" disabled={!history.length || isExporting} onClick={onExportCsv} type="button">
+          <Download size={16} />
+          CSV
+        </button>
         <button
           aria-label="Limpar histórico local"
           className="report-icon-button"
@@ -1084,6 +1398,17 @@ function AnalysisHistoryPanel({
         >
           <Trash2 size={16} />
         </button>
+      </div>
+
+      <div className="template-actions">
+        <a className="template-link" href={templateXlsxUrl} rel="noreferrer" target="_blank">
+          <FileSpreadsheet size={15} />
+          Base Excel
+        </a>
+        <a className="template-link" href={templateCsvUrl} rel="noreferrer" target="_blank">
+          <FileSpreadsheet size={16} />
+          Base CSV
+        </a>
       </div>
 
       {status && <p className="history-status">{status}</p>}

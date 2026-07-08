@@ -704,12 +704,13 @@ h2 {
 
 .history-actions {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(112px, 0.7fr) 38px;
+  grid-template-columns: minmax(0, 1fr) minmax(78px, 0.55fr) 38px;
   gap: 8px;
 }
 
 .report-action,
-.report-icon-button {
+.report-icon-button,
+.template-link {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -723,6 +724,19 @@ h2 {
   font-size: 0.78rem;
   font-weight: 900;
   text-decoration: none;
+}
+
+.template-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.template-link {
+  gap: 7px;
+  min-height: 34px;
+  color: #b8d4c7;
+  font-size: 0.76rem;
 }
 
 .report-action {

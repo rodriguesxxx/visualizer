@@ -24,7 +24,7 @@ results = model.train(
 - Sobreposição de máscaras e bounding boxes.
 - Upload local de imagem para pré-visualização.
 - Contagem das classes atuais: `folha` e `fruto`.
-- Histórico local das análises com exportação CSV para planilha.
+- Histórico local das análises com exportação CSV e Excel para planilha.
 - Gráficos de contagem e curva demonstrativa de treino v1.
 - Lista de instâncias com confiança e descritores CIELab.
 
@@ -80,13 +80,14 @@ No Hugging Face, a API precisa responder por HTTPS e permitir CORS para o domín
 
 ## Exportação de histórico
 
-O histórico de análises é salvo no `localStorage` do navegador do cliente. A planilha base fica em:
+O histórico de análises é salvo no `localStorage` do navegador do cliente. As planilhas base ficam em:
 
 ```text
 public/reports/analysis-history-template.csv
+public/reports/analysis-history-template.xlsx
 ```
 
-No GitHub Pages, o app busca essa base como arquivo estático e gera o CSV final no próprio navegador.
+No GitHub Pages, o app busca essas bases como arquivos estáticos e gera o CSV ou Excel final no próprio navegador.
 
 ### Hugging Face privado e `HF_TOKEN`
 
