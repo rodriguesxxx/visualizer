@@ -24,6 +24,7 @@ results = model.train(
 - Sobreposição de máscaras e bounding boxes.
 - Upload local de imagem para pré-visualização.
 - Contagem das classes atuais: `folha` e `fruto`.
+- Histórico local das análises com exportação CSV para planilha.
 - Gráficos de contagem e curva demonstrativa de treino v1.
 - Lista de instâncias com confiança e descritores CIELab.
 
@@ -76,6 +77,16 @@ npm run preview
 ```
 
 No Hugging Face, a API precisa responder por HTTPS e permitir CORS para o domínio do Pages. A API FastAPI deste repositório já usa `CORSMiddleware` com origem liberada.
+
+## Exportação de histórico
+
+O histórico de análises é salvo no `localStorage` do navegador do cliente. A planilha base fica em:
+
+```text
+public/reports/analysis-history-template.csv
+```
+
+No GitHub Pages, o app busca essa base como arquivo estático e gera o CSV final no próprio navegador.
 
 ### Hugging Face privado e `HF_TOKEN`
 

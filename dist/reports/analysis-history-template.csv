@@ -1,0 +1,1 @@
+plant_id,analysis_id,analyzed_at,image_name,image_size_bytes,image_size,image_type,leaf_count,fruit_count,total_detections,average_confidence,model,latency_ms

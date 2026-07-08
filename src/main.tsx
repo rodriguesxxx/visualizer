@@ -8,7 +8,10 @@ import {
   ChevronDown,
   CheckCircle2,
   CircleDot,
+  Download,
   Eye,
+  FileSpreadsheet,
+  History,
   ImageUp,
   Images,
   Layers3,
@@ -17,7 +20,8 @@ import {
   Plus,
   ScanLine,
   SlidersVertical,
-  Sparkles
+  Sparkles,
+  Trash2
 } from "lucide-react";
 import "./styles.css";
 
@@ -47,6 +51,22 @@ type TrainingArtifact = {
   file: string;
   url: string;
   sizeBytes: number;
+};
+
+type AnalysisHistoryItem = {
+  id: string;
+  plantId: string;
+  analyzedAt: string;
+  imageName: string;
+  imageSizeBytes: number;
+  imageSize: string;
+  imageType: string;
+  leafCount: number;
+  fruitCount: number;
+  totalDetections: number;
+  averageConfidence: number;
+  model: string;
+  latencyMs: number | null;
 };
 
 type ApiDetection = {
@@ -94,16 +114,34 @@ type Pan = {
   y: number;
 };
 
-const API_BASE = (
-  (import.meta as unknown as { env?: { VITE_MODEL_API_URL?: string } }).env?.VITE_MODEL_API_URL ??
-  "http://localhost:8000"
-).replace(/\/$/, "");
+const viteEnv = (import.meta as unknown as { env?: { BASE_URL?: string; VITE_MODEL_API_URL?: string } }).env;
+const appBaseUrl = viteEnv?.BASE_URL ?? "/";
+const publicAssetBaseUrl = appBaseUrl.endsWith("/") ? appBaseUrl : `${appBaseUrl}/`;
+const API_BASE = (viteEnv?.VITE_MODEL_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
 const inferenceTimeoutMs = 90_000;
 const maxConvertedImageSide = 1280;
 const jpegQuality = 0.82;
 const apiCacheTtlMs = 12 * 60 * 60 * 1000;
 const apiCachePrefix = "plant-ai-api-cache";
 const artifactImageCacheName = "plant-ai-artifact-images-v1";
+const analysisHistoryStorageKey = "plant-ai-analysis-history-v1";
+const maxAnalysisHistoryItems = 100;
+const analysisReportTemplateUrl = `${publicAssetBaseUrl}reports/analysis-history-template.csv`;
+const analysisReportHeaders = [
+  "plant_id",
+  "analysis_id",
+  "analyzed_at",
+  "image_name",
+  "image_size_bytes",
+  "image_size",
+  "image_type",
+  "leaf_count",
+  "fruit_count",
+  "total_detections",
+  "average_confidence",
+  "model",
+  "latency_ms"
+];
 const pendingJsonRequests = new Map<string, Promise<unknown>>();
 const pendingArtifactImageRequests = new Map<string, Promise<string>>();
 
@@ -308,6 +346,170 @@ const formatFileSize = (bytes: number) => {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 };
 
+const generateRandomId = (prefix: string) => {
+  if (window.crypto?.getRandomValues) {
+    const bytes = new Uint8Array(6);
+    window.crypto.getRandomValues(bytes);
+    return `${prefix}-${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("").toUpperCase()}`;
+  }
+
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`.toUpperCase();
+};
+
+const countDetectionsByClass = (items: Detection[]) =>
+  items.reduce(
+    (acc, detection) => {
+      acc[detection.className] += 1;
+      return acc;
+    },
+    { folha: 0, fruto: 0 }
+  );
+
+const getAverageConfidence = (items: Detection[]) =>
+  items.length ? items.reduce((total, detection) => total + detection.confidence, 0) / items.length : 0;
+
+const isAnalysisHistoryItem = (item: unknown): item is AnalysisHistoryItem => {
+  if (!item || typeof item !== "object") return false;
+  const candidate = item as Partial<AnalysisHistoryItem>;
+  return (
+    typeof candidate.id === "string" &&
+    typeof candidate.plantId === "string" &&
+    typeof candidate.analyzedAt === "string" &&
+    typeof candidate.imageName === "string" &&
+    typeof candidate.imageSizeBytes === "number" &&
+    typeof candidate.leafCount === "number" &&
+    typeof candidate.fruitCount === "number"
+  );
+};
+
+const readAnalysisHistory = () => {
+  try {
+    const raw = window.localStorage.getItem(analysisHistoryStorageKey);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(isAnalysisHistoryItem).slice(0, maxAnalysisHistoryItems);
+  } catch (error) {
+    return [];
+  }
+};
+
+const writeAnalysisHistory = (items: AnalysisHistoryItem[]) => {
+  try {
+    window.localStorage.setItem(analysisHistoryStorageKey, JSON.stringify(items.slice(0, maxAnalysisHistoryItems)));
+    return true;
+  } catch (error) {
+    return false;
+  }
+};
+
+const createAnalysisHistoryItem = ({
+  file,
+  detections,
+  model,
+  latencyMs
+}: {
+  file: File;
+  detections: Detection[];
+  model: string;
+  latencyMs: number | null;
+}): AnalysisHistoryItem => {
+  const counts = countDetectionsByClass(detections);
+
+  return {
+    id: generateRandomId("ANL"),
+    plantId: generateRandomId("PLT"),
+    analyzedAt: new Date().toISOString(),
+    imageName: file.name,
+    imageSizeBytes: file.size,
+    imageSize: formatFileSize(file.size),
+    imageType: file.type || "desconhecido",
+    leafCount: counts.folha,
+    fruitCount: counts.fruto,
+    totalDetections: detections.length,
+    averageConfidence: getAverageConfidence(detections),
+    model,
+    latencyMs
+  };
+};
+
+const formatDateTime = (value: string) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+
+  return new Intl.DateTimeFormat("pt-BR", {
+    dateStyle: "short",
+    timeStyle: "short"
+  }).format(date);
+};
+
+const reportColumnGetters: Record<string, (item: AnalysisHistoryItem) => string | number | null> = {
+  plant_id: (item) => item.plantId,
+  analysis_id: (item) => item.id,
+  analyzed_at: (item) => item.analyzedAt,
+  image_name: (item) => item.imageName,
+  image_size_bytes: (item) => item.imageSizeBytes,
+  image_size: (item) => item.imageSize,
+  image_type: (item) => item.imageType,
+  leaf_count: (item) => item.leafCount,
+  fruit_count: (item) => item.fruitCount,
+  total_detections: (item) => item.totalDetections,
+  average_confidence: (item) => item.averageConfidence.toFixed(4),
+  model: (item) => item.model,
+  latency_ms: (item) => item.latencyMs
+};
+
+const normalizeReportHeaderColumn = (column: string) => column.trim().replace(/^"|"$/g, "");
+
+const escapeCsvValue = (value: string | number | null | undefined) => {
+  const text = value === null || value === undefined ? "" : String(value);
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, "\"\"")}"` : text;
+};
+
+const getAnalysisReportTemplateHeader = async () => {
+  try {
+    const response = await fetch(analysisReportTemplateUrl, { cache: "no-cache" });
+    if (response.ok) {
+      const template = await response.text();
+      const header = template.split(/\r?\n/).find((line) => line.trim());
+      if (header) return header.trim();
+    }
+  } catch (error) {
+    // The exported report can still be generated with the built-in header.
+  }
+
+  return analysisReportHeaders.join(",");
+};
+
+const buildAnalysisHistoryCsv = async (items: AnalysisHistoryItem[]) => {
+  const header = await getAnalysisReportTemplateHeader();
+  const columns = header.split(",").map(normalizeReportHeaderColumn);
+  const rows = items.map((item) =>
+    columns.map((column) => escapeCsvValue(reportColumnGetters[column]?.(item) ?? "")).join(",")
+  );
+
+  return `\uFEFF${[header, ...rows].join("\r\n")}\r\n`;
+};
+
+const downloadCsvFile = (filename: string, csv: string) => {
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+};
+
+const exportAnalysisHistoryCsv = async (items: AnalysisHistoryItem[]) => {
+  const csv = await buildAnalysisHistoryCsv(items);
+  const date = new Date().toISOString().slice(0, 10);
+  downloadCsvFile(`plant-ai-historico-analises-${date}.csv`, csv);
+};
+
 const analyzeImageRequest = async (form: FormData) => {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), inferenceTimeoutMs);
@@ -360,6 +562,9 @@ function App() {
   const [isDraggingImage, setIsDraggingImage] = useState(false);
   const [isInstancesExpanded, setIsInstancesExpanded] = useState(false);
   const [isArtifactsExpanded, setIsArtifactsExpanded] = useState(false);
+  const [analysisHistory, setAnalysisHistory] = useState<AnalysisHistoryItem[]>(readAnalysisHistory);
+  const [isExportingHistory, setIsExportingHistory] = useState(false);
+  const [historyMessage, setHistoryMessage] = useState("");
   const beforeSize = useElementSize(beforeCardRef);
   const afterSize = useElementSize(afterCardRef);
   const [message, setMessage] = useState("Carregando metadados do treino v1...");
@@ -395,21 +600,9 @@ function App() {
     [detections, selectedClass]
   );
 
-  const counts = useMemo(
-    () =>
-      detections.reduce(
-        (acc, detection) => {
-          acc[detection.className] += 1;
-          return acc;
-        },
-        { folha: 0, fruto: 0 }
-      ),
-    [detections]
-  );
+  const counts = useMemo(() => countDetectionsByClass(detections), [detections]);
 
-  const confidence = detections.length
-    ? detections.reduce((total, detection) => total + detection.confidence, 0) / detections.length
-    : 0;
+  const confidence = getAverageConfidence(detections);
   const totalArea = detections.reduce((total, detection) => total + detection.area, 0);
   const visibleDetections = isAnalyzing ? [] : filteredDetections;
   const lastMetric = trainingMetrics[trainingMetrics.length - 1];
@@ -459,6 +652,39 @@ function App() {
     setAnalysisPan((pan) => clampPan(pan, analysisZoom, analysisSurface));
   }, [analysisSurface.width, analysisSurface.height, analysisZoom]);
 
+  const addAnalysisHistoryItem = (item: AnalysisHistoryItem) => {
+    const next = [item, ...analysisHistory].slice(0, maxAnalysisHistoryItems);
+    const wasSaved = writeAnalysisHistory(next);
+    setAnalysisHistory(next);
+    setHistoryMessage(wasSaved ? `Análise ${item.plantId} salva no navegador.` : "Análise registrada apenas nesta sessão.");
+  };
+
+  const handleExportHistory = async () => {
+    if (!analysisHistory.length || isExportingHistory) return;
+
+    setIsExportingHistory(true);
+    setHistoryMessage("Montando planilha...");
+
+    try {
+      await exportAnalysisHistoryCsv(analysisHistory);
+      setHistoryMessage(`Planilha gerada com ${analysisHistory.length} análises.`);
+    } catch (error) {
+      setHistoryMessage("Não foi possível gerar a planilha.");
+    } finally {
+      setIsExportingHistory(false);
+    }
+  };
+
+  const clearAnalysisHistory = () => {
+    if (!analysisHistory.length) return;
+    const shouldClear = window.confirm("Limpar o histórico de análises salvo neste navegador?");
+    if (!shouldClear) return;
+
+    setAnalysisHistory([]);
+    writeAnalysisHistory([]);
+    setHistoryMessage("Histórico local limpo.");
+  };
+
   const analyzeFile = async (file: File) => {
     if (!isSupportedImageFile(file)) {
       setMessage("Arquivo ignorado. Arraste ou selecione uma imagem JPG, PNG, HEIC ou HEIF.");
@@ -484,11 +710,20 @@ function App() {
       }
 
       const payload = (await response.json()) as AnalyzeResponse;
+      const nextDetections = payload.detections.map(toDetection).filter(Boolean) as Detection[];
+      const historyItem = createAnalysisHistoryItem({
+        file,
+        detections: nextDetections,
+        model: payload.model,
+        latencyMs: payload.latencyMs
+      });
+
       setImageSrc(payload.image.originalDataUrl);
-      setDetections(payload.detections.map(toDetection).filter(Boolean) as Detection[]);
+      setDetections(nextDetections);
       setLatencyMs(payload.latencyMs);
       setAnalysisModel(payload.model);
       setApiStatus("online");
+      addAnalysisHistoryItem(historyItem);
       setMessage(`Inferência concluída em ${(payload.latencyMs / 1000).toFixed(2)}s`);
     } catch (error) {
       setApiStatus("offline");
@@ -734,6 +969,15 @@ function App() {
               </span>
             </div>
           </section>
+
+          <AnalysisHistoryPanel
+            history={analysisHistory}
+            isExporting={isExportingHistory}
+            status={historyMessage}
+            templateUrl={analysisReportTemplateUrl}
+            onClear={clearAnalysisHistory}
+            onExport={handleExportHistory}
+          />
         </aside>
       </section>
 
@@ -794,6 +1038,72 @@ function App() {
         </article>
       </section>
     </main>
+  );
+}
+
+function AnalysisHistoryPanel({
+  history,
+  isExporting,
+  status,
+  templateUrl,
+  onClear,
+  onExport
+}: {
+  history: AnalysisHistoryItem[];
+  isExporting: boolean;
+  status: string;
+  templateUrl: string;
+  onClear: () => void;
+  onExport: () => void;
+}) {
+  const savedLabel = `${history.length} ${history.length === 1 ? "salva" : "salvas"}`;
+  const latestItems = history.slice(0, 3);
+
+  return (
+    <section className="data-panel history-panel">
+      <div className="panel-title-row">
+        <PanelTitle icon={<History size={18} />} title="Histórico de análises" />
+        <span className="history-count">{savedLabel}</span>
+      </div>
+
+      <div className="history-actions">
+        <button className="report-action primary" disabled={!history.length || isExporting} onClick={onExport} type="button">
+          <Download size={16} />
+          {isExporting ? "Gerando" : "Exportar CSV"}
+        </button>
+        <a className="report-action" href={templateUrl} rel="noreferrer" target="_blank">
+          <FileSpreadsheet size={16} />
+          Base CSV
+        </a>
+        <button
+          aria-label="Limpar histórico local"
+          className="report-icon-button"
+          disabled={!history.length}
+          onClick={onClear}
+          type="button"
+        >
+          <Trash2 size={16} />
+        </button>
+      </div>
+
+      {status && <p className="history-status">{status}</p>}
+
+      {latestItems.length ? (
+        <div className="history-list" aria-label="Últimas análises salvas">
+          {latestItems.map((item) => (
+            <div className="history-item" key={item.id}>
+              <strong>{item.plantId}</strong>
+              <span title={item.imageName}>{item.imageName}</span>
+              <small>
+                {formatDateTime(item.analyzedAt)} | {item.leafCount} folhas | {item.fruitCount} frutos
+              </small>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="empty-state">Nenhuma análise salva.</p>
+      )}
+    </section>
   );
 }
 
