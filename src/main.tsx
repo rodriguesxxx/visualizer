@@ -18,6 +18,7 @@ import {
   Leaf,
   Minus,
   Plus,
+  Ruler,
   ScanLine,
   SlidersVertical,
   Sparkles,
@@ -25,8 +26,9 @@ import {
 } from "lucide-react";
 import "./styles.css";
 
-type ClassName = "folha" | "fruto";
+type ClassName = "folha" | "fruto" | "marcador_aruco" | "planta_inteira";
 type ViewMode = "masks" | "boxes" | "compare";
+type AnalysisSource = "visualizer" | "api";
 
 type Detection = {
   id: string;
@@ -36,6 +38,79 @@ type Detection = {
   mask: string;
   area: number;
   lab: { l: number; a: number; b: number };
+  parentId?: string;
+  state?: string;
+  size?: {
+    imagePercent?: { width?: number; height?: number; area?: number };
+    pixel?: { unit?: string; width?: number; height?: number; area?: number };
+    real?: { unit?: string; width?: number; height?: number; areaMm2?: number };
+  };
+};
+
+type ScaleMeasurement = {
+  calibrated?: boolean;
+  reason?: string;
+  dictionary?: string;
+  configuredMarkerSizeMm?: number | null;
+  markersDetected?: number;
+  markerIds?: number[];
+  reference?: string;
+  yoloMarkersDetected?: number;
+  averageSidePixels?: number;
+  medianSidePixels?: number;
+  mmPerPixel?: number;
+  pixelsPerMm?: number;
+  markers?: Array<{
+    id?: number;
+    averageSidePixels?: number;
+    corners?: Array<{ x?: number; y?: number }>;
+  }>;
+};
+
+type HeightMeasurement = {
+  unit?: string;
+  calibrated?: boolean;
+  count?: number;
+  average?: number;
+  max?: number;
+  pixel?: { unit?: string; average?: number; max?: number };
+  real?: { unit?: string; average?: number; max?: number };
+};
+
+type SizeMeasurement = {
+  unit?: string;
+  calibrated?: boolean;
+  count?: number;
+  averageWidth?: number;
+  averageHeight?: number;
+  averageArea?: number;
+  pixel?: { unit?: string; averageWidth?: number; averageHeight?: number; averageArea?: number };
+  real?: {
+    unit?: string;
+    averageWidth?: number;
+    averageHeight?: number;
+    averageAreaMm2?: number;
+  };
+};
+
+type InferenceMeasurements = {
+  scale?: ScaleMeasurement;
+  plantHeight?: HeightMeasurement;
+  fruitSize?: SizeMeasurement;
+  fruitStates?: { method?: string; counts?: Record<string, number> };
+  leafSize?: SizeMeasurement;
+  [key: string]: unknown;
+};
+
+type DetectionMeasurementRecord = {
+  id: string;
+  className: ClassName;
+  confidence: number;
+  area: number;
+  lab: Detection["lab"];
+  parentId?: string;
+  state?: string;
+  size?: Detection["size"];
 };
 
 type TrainingMetric = {
@@ -63,10 +138,22 @@ type AnalysisHistoryItem = {
   imageType: string;
   leafCount: number;
   fruitCount: number;
+  plantCount?: number;
+  markerCount?: number;
   totalDetections: number;
   averageConfidence: number;
   model: string;
+  datasetVersion?: string;
+  trainingMap50Mask?: number;
+  trainingPrecisionMask?: number;
+  trainingRecallMask?: number;
   latencyMs: number | null;
+  imageWidth?: number;
+  imageHeight?: number;
+  originalImageWidth?: number;
+  originalImageHeight?: number;
+  measurements?: InferenceMeasurements;
+  detectionMeasurements?: DetectionMeasurementRecord[];
 };
 
 type ApiDetection = {
@@ -74,20 +161,29 @@ type ApiDetection = {
   className: string;
   confidence: number;
   bbox: { x: number; y: number; w: number; h: number };
-  mask: Array<{ x: number; y: number }>;
-  area: number;
-  lab: { l: number; a: number; b: number };
+  mask?: Array<{ x: number; y: number }>;
+  area?: number;
+  lab?: { l: number; a: number; b: number };
+  parentId?: string;
+  state?: string;
+  size?: Detection["size"];
 };
 
 type AnalyzeResponse = {
-  model: string;
+  model: string | ApiModelInfo;
+  filename?: string;
   latencyMs: number;
   image: {
-    originalDataUrl: string;
-    annotatedDataUrl: string;
+    width?: number;
+    height?: number;
+    originalWidth?: number;
+    originalHeight?: number;
+    originalDataUrl?: string;
+    annotatedDataUrl?: string;
   };
   counts: Record<string, number>;
   detections: ApiDetection[];
+  measurements?: InferenceMeasurements;
 };
 
 type ApiTrainingMetric = {
@@ -100,8 +196,46 @@ type ApiTrainingMetric = {
   classLoss: number;
 };
 
+type ApiClassInfo = {
+  id: number;
+  name: string;
+};
+
 type ApiModelInfo = {
+  id?: string;
   name?: string;
+  task?: string;
+  datasetVersion?: string;
+  baseModel?: string;
+  classes?: Array<string | ApiClassInfo>;
+  weights?: {
+    current?: { exists?: boolean; path?: string; sizeBytes?: number };
+    last?: { exists?: boolean; path?: string; sizeBytes?: number };
+    loadedFrom?: string;
+  };
+  inference?: {
+    configuredImgSize?: number;
+    defaultConfidence?: number;
+    defaultIou?: number;
+    runtime?: { name?: string; device?: string; imgsz?: number; maxDetections?: number };
+    pipeline?: string;
+    topLevelClasses?: string[];
+    childClasses?: string[];
+  };
+  training?: {
+    epochs?: number;
+    completedEpochs?: number;
+    batch?: number;
+    device?: string;
+    optimizer?: string;
+    pretrained?: boolean;
+    finalMetrics?: ApiTrainingMetric;
+  };
+};
+
+type ApiTrainingSummary = {
+  datasetVersion?: string;
+  final?: ApiTrainingMetric;
 };
 
 type Size = {
@@ -114,10 +248,16 @@ type Pan = {
   y: number;
 };
 
+type InferenceParams = {
+  confidence: number;
+  iou: number;
+};
+
 const viteEnv = (import.meta as unknown as { env?: { BASE_URL?: string; VITE_MODEL_API_URL?: string } }).env;
 const appBaseUrl = viteEnv?.BASE_URL ?? "/";
 const publicAssetBaseUrl = appBaseUrl.endsWith("/") ? appBaseUrl : `${appBaseUrl}/`;
 const API_BASE = (viteEnv?.VITE_MODEL_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
+const defaultInferenceParams: InferenceParams = { confidence: 0.25, iou: 0.7 };
 const inferenceTimeoutMs = 90_000;
 const maxConvertedImageSide = 1280;
 const jpegQuality = 0.82;
@@ -141,7 +281,72 @@ const analysisReportHeaders = [
   "total_detections",
   "average_confidence",
   "model",
-  "latency_ms"
+  "latency_ms",
+  "plant_count",
+  "aruco_marker_count",
+  "dataset_version",
+  "training_map50_mask",
+  "training_precision_mask",
+  "training_recall_mask",
+  "processed_image_width_px",
+  "processed_image_height_px",
+  "original_image_width_px",
+  "original_image_height_px",
+  "scale_calibrated",
+  "scale_reason",
+  "scale_dictionary",
+  "scale_marker_size_mm",
+  "scale_markers_detected",
+  "scale_yolo_markers_detected",
+  "scale_marker_ids",
+  "scale_average_side_px",
+  "scale_median_side_px",
+  "scale_mm_per_pixel",
+  "scale_pixels_per_mm",
+  "plant_height_count",
+  "plant_height_source_unit",
+  "plant_height_calibrated",
+  "plant_height_average_percent",
+  "plant_height_max_percent",
+  "plant_height_average_px",
+  "plant_height_max_px",
+  "plant_height_real_unit",
+  "plant_height_average_mm",
+  "plant_height_max_mm",
+  "leaf_size_count",
+  "leaf_size_source_unit",
+  "leaf_size_calibrated",
+  "leaf_average_width_percent",
+  "leaf_average_height_percent",
+  "leaf_average_area_percent",
+  "leaf_average_width_px",
+  "leaf_average_height_px",
+  "leaf_average_area_px2",
+  "leaf_size_real_unit",
+  "leaf_average_width_mm",
+  "leaf_average_height_mm",
+  "leaf_average_area_mm2",
+  "fruit_size_count",
+  "fruit_size_source_unit",
+  "fruit_size_calibrated",
+  "fruit_average_width_percent",
+  "fruit_average_height_percent",
+  "fruit_average_area_percent",
+  "fruit_average_width_px",
+  "fruit_average_height_px",
+  "fruit_average_area_px2",
+  "fruit_size_real_unit",
+  "fruit_average_width_mm",
+  "fruit_average_height_mm",
+  "fruit_average_area_mm2",
+  "fruit_states_method",
+  "fruit_state_green_count",
+  "fruit_state_ripening_count",
+  "fruit_state_ripe_count",
+  "fruit_state_undefined_count",
+  "fruit_states_counts",
+  "detection_measurements_json",
+  "measurements_json"
 ];
 const spreadsheetXmlNamespace = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 const pendingJsonRequests = new Map<string, Promise<unknown>>();
@@ -177,19 +382,22 @@ const initialDetections: Detection[] = [
   }
 ];
 
-const initialTrainingMetrics: TrainingMetric[] = [
-  { epoch: 1, map50: 0.18, precision: 0.32, recall: 0.21, loss: 2.9 },
-  { epoch: 10, map50: 0.41, precision: 0.58, recall: 0.43, loss: 1.74 },
-  { epoch: 20, map50: 0.57, precision: 0.69, recall: 0.56, loss: 1.18 },
-  { epoch: 30, map50: 0.67, precision: 0.75, recall: 0.62, loss: 0.91 },
-  { epoch: 40, map50: 0.73, precision: 0.8, recall: 0.68, loss: 0.76 },
-  { epoch: 50, map50: 0.78, precision: 0.84, recall: 0.72, loss: 0.64 }
-];
+const initialImageSrc = "https://images.unsplash.com/photo-1523348837708-15d4a09cfac2?auto=format&fit=crop&w=1400&q=82";
 
-const classStyle = {
-  folha: { label: "Folha", color: "#42f58d", soft: "rgba(66, 245, 141, .25)" },
-  fruto: { label: "Fruto", color: "#ff5c7a", soft: "rgba(255, 92, 122, .25)" }
+const classStyle: Record<ClassName, { label: string; pluralLabel: string; color: string; soft: string }> = {
+  folha: { label: "Folha", pluralLabel: "Folhas", color: "#42f58d", soft: "rgba(66, 245, 141, .25)" },
+  fruto: { label: "Fruto", pluralLabel: "Frutos", color: "#ff5c7a", soft: "rgba(255, 92, 122, .25)" },
+  marcador_aruco: { label: "Marcador", pluralLabel: "Marcadores", color: "#69c8ff", soft: "rgba(105, 200, 255, .25)" },
+  planta_inteira: { label: "Planta", pluralLabel: "Plantas", color: "#f2d66d", soft: "rgba(242, 214, 109, .24)" }
 };
+const displayClasses: ClassName[] = ["planta_inteira", "folha", "fruto", "marcador_aruco"];
+const classFilterOptions: Array<{ value: ClassName | "todas"; label: string; icon: React.ReactNode }> = [
+  { value: "todas", label: "Todas", icon: <Sparkles size={16} /> },
+  { value: "planta_inteira", label: "Planta", icon: <Layers3 size={16} /> },
+  { value: "folha", label: "Folhas", icon: <Leaf size={16} /> },
+  { value: "fruto", label: "Frutos", icon: <CircleDot size={16} /> },
+  { value: "marcador_aruco", label: "Marcador", icon: <ScanLine size={16} /> }
+];
 
 const imageAccept = "image/*,.heic,.heif";
 const heicExtensions = [".heic", ".heif"];
@@ -317,6 +525,12 @@ const fetchCachedJson = async <T,>(cacheKey: string, url: string) => {
   return request;
 };
 
+const fetchFreshJson = async <T,>(url: string) => {
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) throw new Error(`Falha ao carregar ${url}`);
+  return (await response.json()) as T;
+};
+
 const getCachedArtifactImageUrl = async (url: string) => {
   if (!("caches" in window)) return url;
 
@@ -358,17 +572,54 @@ const generateRandomId = (prefix: string) => {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`.toUpperCase();
 };
 
-const countDetectionsByClass = (items: Detection[]) =>
-  items.reduce(
-    (acc, detection) => {
-      acc[detection.className] += 1;
+const getEmptyClassCounts = () =>
+  displayClasses.reduce(
+    (acc, className) => {
+      acc[className] = 0;
       return acc;
     },
-    { folha: 0, fruto: 0 }
+    {} as Record<ClassName, number>
   );
+
+const isFiniteNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
+
+const countDetectionsByClass = (items: Detection[]) =>
+  items.reduce((acc, detection) => {
+    acc[detection.className] += 1;
+    return acc;
+  }, getEmptyClassCounts());
+
+const normalizeApiCounts = (apiCounts: Record<string, number> | undefined, items: Detection[]) => {
+  const fallback = countDetectionsByClass(items);
+  return displayClasses.reduce((counts, className) => {
+    counts[className] = isFiniteNumber(apiCounts?.[className]) ? apiCounts[className] : fallback[className];
+    return counts;
+  }, getEmptyClassCounts());
+};
 
 const getAverageConfidence = (items: Detection[]) =>
   items.length ? items.reduce((total, detection) => total + detection.confidence, 0) / items.length : 0;
+
+const toKnownClassName = (value: string): ClassName | null => {
+  if (value === "folha" || value === "fruto" || value === "marcador_aruco" || value === "planta_inteira") return value;
+  return null;
+};
+
+const getModelDisplayName = (model: string | ApiModelInfo | null | undefined) => {
+  if (!model) return "Plant.AI YOLOv8-seg";
+  if (typeof model === "string") return model;
+  return model.name ?? model.id ?? "Plant.AI YOLOv8-seg";
+};
+
+const getModelClassLabels = (model: ApiModelInfo | null | undefined) => {
+  if (!model?.classes?.length) return [];
+
+  return model.classes.map((item) => {
+    const name = typeof item === "string" ? item : item.name;
+    const knownName = toKnownClassName(name);
+    return knownName ? classStyle[knownName].label : name;
+  });
+};
 
 const isAnalysisHistoryItem = (item: unknown): item is AnalysisHistoryItem => {
   if (!item || typeof item !== "object") return false;
@@ -408,15 +659,36 @@ const writeAnalysisHistory = (items: AnalysisHistoryItem[]) => {
 const createAnalysisHistoryItem = ({
   file,
   detections,
+  counts,
   model,
-  latencyMs
+  datasetVersion,
+  trainingMetric,
+  latencyMs,
+  image,
+  measurements
 }: {
   file: File;
   detections: Detection[];
+  counts: Record<ClassName, number>;
   model: string;
+  datasetVersion?: string;
+  trainingMetric?: TrainingMetric | null;
   latencyMs: number | null;
+  image: AnalyzeResponse["image"];
+  measurements?: InferenceMeasurements;
 }): AnalysisHistoryItem => {
-  const counts = countDetectionsByClass(detections);
+  const detectionMeasurements = detections.map(
+    ({ id, className, confidence, area, lab, parentId, state, size }): DetectionMeasurementRecord => ({
+      id,
+      className,
+      confidence,
+      area,
+      lab,
+      parentId,
+      state,
+      size
+    })
+  );
 
   return {
     id: generateRandomId("ANL"),
@@ -426,12 +698,24 @@ const createAnalysisHistoryItem = ({
     imageSizeBytes: file.size,
     imageSize: formatFileSize(file.size),
     imageType: file.type || "desconhecido",
+    plantCount: counts.planta_inteira,
     leafCount: counts.folha,
     fruitCount: counts.fruto,
+    markerCount: counts.marcador_aruco,
     totalDetections: detections.length,
     averageConfidence: getAverageConfidence(detections),
     model,
-    latencyMs
+    datasetVersion,
+    trainingMap50Mask: trainingMetric?.map50,
+    trainingPrecisionMask: trainingMetric?.precision,
+    trainingRecallMask: trainingMetric?.recall,
+    latencyMs,
+    imageWidth: image.width,
+    imageHeight: image.height,
+    originalImageWidth: image.originalWidth,
+    originalImageHeight: image.originalHeight,
+    measurements,
+    detectionMeasurements
   };
 };
 
@@ -445,6 +729,25 @@ const formatDateTime = (value: string) => {
   }).format(date);
 };
 
+const formatBooleanForReport = (value: boolean | undefined) =>
+  typeof value === "boolean" ? String(value) : null;
+
+const stringifyForReport = (value: unknown) => {
+  if (value === undefined || value === null) return "";
+  try {
+    return JSON.stringify(value);
+  } catch (error) {
+    return "";
+  }
+};
+
+const getFruitStateCount = (item: AnalysisHistoryItem, keys: string[]) => {
+  const counts = item.measurements?.fruitStates?.counts;
+  if (!counts) return null;
+  const matchedValue = keys.find((key) => isFiniteNumber(counts[key]));
+  return matchedValue ? counts[matchedValue] : null;
+};
+
 const reportColumnGetters: Record<string, (item: AnalysisHistoryItem) => string | number | null> = {
   plant_id: (item) => item.plantId,
   analysis_id: (item) => item.id,
@@ -453,16 +756,85 @@ const reportColumnGetters: Record<string, (item: AnalysisHistoryItem) => string 
   image_size_bytes: (item) => item.imageSizeBytes,
   image_size: (item) => item.imageSize,
   image_type: (item) => item.imageType,
+  plant_count: (item) => item.plantCount ?? null,
   leaf_count: (item) => item.leafCount,
   fruit_count: (item) => item.fruitCount,
+  aruco_marker_count: (item) => item.markerCount ?? null,
   total_detections: (item) => item.totalDetections,
-  average_confidence: (item) => Number(item.averageConfidence.toFixed(4)),
-  model: (item) => item.model,
-  latency_ms: (item) => item.latencyMs
+  average_confidence: (item) =>
+    isFiniteNumber(item.averageConfidence) ? Number(item.averageConfidence.toFixed(4)) : null,
+  model: (item) => item.model ?? null,
+  dataset_version: (item) => item.datasetVersion ?? null,
+  training_map50_mask: (item) => item.trainingMap50Mask ?? null,
+  training_precision_mask: (item) => item.trainingPrecisionMask ?? null,
+  training_recall_mask: (item) => item.trainingRecallMask ?? null,
+  latency_ms: (item) => item.latencyMs,
+  processed_image_width_px: (item) => item.imageWidth ?? null,
+  processed_image_height_px: (item) => item.imageHeight ?? null,
+  original_image_width_px: (item) => item.originalImageWidth ?? null,
+  original_image_height_px: (item) => item.originalImageHeight ?? null,
+  scale_calibrated: (item) => formatBooleanForReport(item.measurements?.scale?.calibrated),
+  scale_reason: (item) => item.measurements?.scale?.reason ?? null,
+  scale_dictionary: (item) => item.measurements?.scale?.dictionary ?? null,
+  scale_marker_size_mm: (item) => item.measurements?.scale?.configuredMarkerSizeMm ?? null,
+  scale_markers_detected: (item) => item.measurements?.scale?.markersDetected ?? null,
+  scale_yolo_markers_detected: (item) => item.measurements?.scale?.yoloMarkersDetected ?? null,
+  scale_marker_ids: (item) => item.measurements?.scale?.markerIds?.join("|") ?? null,
+  scale_average_side_px: (item) => item.measurements?.scale?.averageSidePixels ?? null,
+  scale_median_side_px: (item) => item.measurements?.scale?.medianSidePixels ?? null,
+  scale_mm_per_pixel: (item) => item.measurements?.scale?.mmPerPixel ?? null,
+  scale_pixels_per_mm: (item) => item.measurements?.scale?.pixelsPerMm ?? null,
+  plant_height_count: (item) => item.measurements?.plantHeight?.count ?? null,
+  plant_height_source_unit: (item) => item.measurements?.plantHeight?.unit ?? null,
+  plant_height_calibrated: (item) => formatBooleanForReport(item.measurements?.plantHeight?.calibrated),
+  plant_height_average_percent: (item) => item.measurements?.plantHeight?.average ?? null,
+  plant_height_max_percent: (item) => item.measurements?.plantHeight?.max ?? null,
+  plant_height_average_px: (item) => item.measurements?.plantHeight?.pixel?.average ?? null,
+  plant_height_max_px: (item) => item.measurements?.plantHeight?.pixel?.max ?? null,
+  plant_height_real_unit: (item) => item.measurements?.plantHeight?.real?.unit ?? null,
+  plant_height_average_mm: (item) => item.measurements?.plantHeight?.real?.average ?? null,
+  plant_height_max_mm: (item) => item.measurements?.plantHeight?.real?.max ?? null,
+  leaf_size_count: (item) => item.measurements?.leafSize?.count ?? null,
+  leaf_size_source_unit: (item) => item.measurements?.leafSize?.unit ?? null,
+  leaf_size_calibrated: (item) => formatBooleanForReport(item.measurements?.leafSize?.calibrated),
+  leaf_average_width_percent: (item) => item.measurements?.leafSize?.averageWidth ?? null,
+  leaf_average_height_percent: (item) => item.measurements?.leafSize?.averageHeight ?? null,
+  leaf_average_area_percent: (item) => item.measurements?.leafSize?.averageArea ?? null,
+  leaf_average_width_px: (item) => item.measurements?.leafSize?.pixel?.averageWidth ?? null,
+  leaf_average_height_px: (item) => item.measurements?.leafSize?.pixel?.averageHeight ?? null,
+  leaf_average_area_px2: (item) => item.measurements?.leafSize?.pixel?.averageArea ?? null,
+  leaf_size_real_unit: (item) => item.measurements?.leafSize?.real?.unit ?? null,
+  leaf_average_width_mm: (item) => item.measurements?.leafSize?.real?.averageWidth ?? null,
+  leaf_average_height_mm: (item) => item.measurements?.leafSize?.real?.averageHeight ?? null,
+  leaf_average_area_mm2: (item) => item.measurements?.leafSize?.real?.averageAreaMm2 ?? null,
+  fruit_size_count: (item) => item.measurements?.fruitSize?.count ?? null,
+  fruit_size_source_unit: (item) => item.measurements?.fruitSize?.unit ?? null,
+  fruit_size_calibrated: (item) => formatBooleanForReport(item.measurements?.fruitSize?.calibrated),
+  fruit_average_width_percent: (item) => item.measurements?.fruitSize?.averageWidth ?? null,
+  fruit_average_height_percent: (item) => item.measurements?.fruitSize?.averageHeight ?? null,
+  fruit_average_area_percent: (item) => item.measurements?.fruitSize?.averageArea ?? null,
+  fruit_average_width_px: (item) => item.measurements?.fruitSize?.pixel?.averageWidth ?? null,
+  fruit_average_height_px: (item) => item.measurements?.fruitSize?.pixel?.averageHeight ?? null,
+  fruit_average_area_px2: (item) => item.measurements?.fruitSize?.pixel?.averageArea ?? null,
+  fruit_size_real_unit: (item) => item.measurements?.fruitSize?.real?.unit ?? null,
+  fruit_average_width_mm: (item) => item.measurements?.fruitSize?.real?.averageWidth ?? null,
+  fruit_average_height_mm: (item) => item.measurements?.fruitSize?.real?.averageHeight ?? null,
+  fruit_average_area_mm2: (item) => item.measurements?.fruitSize?.real?.averageAreaMm2 ?? null,
+  fruit_states_method: (item) => item.measurements?.fruitStates?.method ?? null,
+  fruit_state_green_count: (item) => getFruitStateCount(item, ["verde", "green"]),
+  fruit_state_ripening_count: (item) => getFruitStateCount(item, ["em_maturacao", "maturando", "ripening"]),
+  fruit_state_ripe_count: (item) => getFruitStateCount(item, ["maduro", "ripe"]),
+  fruit_state_undefined_count: (item) => getFruitStateCount(item, ["indefinido", "undefined", "unknown"]),
+  fruit_states_counts: (item) => stringifyForReport(item.measurements?.fruitStates?.counts),
+  detection_measurements_json: (item) => stringifyForReport(item.detectionMeasurements),
+  measurements_json: (item) => stringifyForReport(item.measurements)
 };
 
 const normalizeReportHeaderColumn = (column: string) => column.trim().replace(/^"|"$/g, "");
-const getReportColumns = (header: string) => header.split(",").map(normalizeReportHeaderColumn);
+const getReportColumns = (header: string) => {
+  const templateColumns = header.split(",").map(normalizeReportHeaderColumn).filter(Boolean);
+  return [...templateColumns, ...analysisReportHeaders.filter((column) => !templateColumns.includes(column))];
+};
 const getReportValue = (column: string, item: AnalysisHistoryItem) => reportColumnGetters[column]?.(item) ?? "";
 
 const escapeCsvValue = (value: string | number | null | undefined) => {
@@ -669,7 +1041,7 @@ const buildAnalysisWorksheetXml = (items: AnalysisHistoryItem[]) => {
   <cols>
     <col min="1" max="3" width="24" customWidth="1" />
     <col min="4" max="4" width="32" customWidth="1" />
-    <col min="5" max="13" width="18" customWidth="1" />
+    <col min="5" max="${analysisReportHeaders.length}" width="18" customWidth="1" />
   </cols>
   <sheetData>${sheetData}</sheetData>
 </worksheet>`;
@@ -761,8 +1133,8 @@ const getAnalysisReportTemplateHeader = async () => {
 };
 
 const buildAnalysisHistoryCsv = async (items: AnalysisHistoryItem[]) => {
-  const header = await getAnalysisReportTemplateHeader();
-  const columns = getReportColumns(header);
+  const columns = getReportColumns(await getAnalysisReportTemplateHeader());
+  const header = columns.join(",");
   const rows = items.map((item) =>
     columns.map((column) => escapeCsvValue(getReportValue(column, item))).join(",")
   );
@@ -814,12 +1186,20 @@ const exportAnalysisHistoryXlsx = async (items: AnalysisHistoryItem[]) => {
   );
 };
 
-const analyzeImageRequest = async (form: FormData) => {
+const normalizeInferenceParam = (value: unknown, fallback: number) =>
+  isFiniteNumber(value) && value > 0 && value <= 1 ? value : fallback;
+
+const analyzeImageRequest = async (form: FormData, params: InferenceParams) => {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), inferenceTimeoutMs);
+  const search = new URLSearchParams({
+    confidence: String(params.confidence),
+    iou: String(params.iou),
+    includeImages: "true"
+  });
 
   try {
-    return await fetch(`${API_BASE}/api/v1/inference/analyze?confidence=0.25&iou=0.7`, {
+    return await fetch(`${API_BASE}/api/v1/inferences?${search}`, {
       method: "POST",
       body: form,
       signal: controller.signal
@@ -848,14 +1228,21 @@ function App() {
   const dragRef = useRef<{ pointerId: number; startX: number; startY: number; origin: Pan } | null>(null);
   const dropDepthRef = useRef(0);
   const [viewMode, setViewMode] = useState<ViewMode>("compare");
+  const [analysisSource, setAnalysisSource] = useState<AnalysisSource>("visualizer");
   const [selectedClass, setSelectedClass] = useState<ClassName | "todas">("todas");
   const [detections, setDetections] = useState<Detection[]>(initialDetections);
-  const [trainingMetrics, setTrainingMetrics] = useState<TrainingMetric[]>(initialTrainingMetrics);
+  const [analysisCounts, setAnalysisCounts] = useState<Record<ClassName, number> | null>(null);
+  const [inferenceMeasurements, setInferenceMeasurements] = useState<InferenceMeasurements | null>(null);
+  const [trainingMetrics, setTrainingMetrics] = useState<TrainingMetric[]>([]);
+  const [trainingFinalMetric, setTrainingFinalMetric] = useState<TrainingMetric | null>(null);
   const [artifacts, setArtifacts] = useState<TrainingArtifact[]>([]);
-  const [imageSrc, setImageSrc] = useState(
-    "https://images.unsplash.com/photo-1523348837708-15d4a09cfac2?auto=format&fit=crop&w=1400&q=82"
-  );
-  const [analysisModel, setAnalysisModel] = useState("Plant.AI YOLOv8-seg v1");
+  const [originalImageSrc, setOriginalImageSrc] = useState(initialImageSrc);
+  const [apiAnnotatedImageSrc, setApiAnnotatedImageSrc] = useState<string | null>(null);
+  const [analysisModel, setAnalysisModel] = useState("");
+  const [datasetVersion, setDatasetVersion] = useState<string | null>(null);
+  const [modelClassLabels, setModelClassLabels] = useState<string[]>([]);
+  const [modelTrainingProgress, setModelTrainingProgress] = useState<{ completed?: number; total?: number }>({});
+  const [inferenceParams, setInferenceParams] = useState<InferenceParams>(defaultInferenceParams);
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
   const [apiStatus, setApiStatus] = useState<"loading" | "online" | "offline">("loading");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -865,31 +1252,67 @@ function App() {
   const [imageAspect, setImageAspect] = useState(1.55);
   const [isDraggingImage, setIsDraggingImage] = useState(false);
   const [isInstancesExpanded, setIsInstancesExpanded] = useState(false);
+  const [isMeasurementsExpanded, setIsMeasurementsExpanded] = useState(false);
   const [isArtifactsExpanded, setIsArtifactsExpanded] = useState(false);
   const [analysisHistory, setAnalysisHistory] = useState<AnalysisHistoryItem[]>(readAnalysisHistory);
   const [isExportingHistory, setIsExportingHistory] = useState(false);
   const [historyMessage, setHistoryMessage] = useState("");
   const beforeSize = useElementSize(beforeCardRef);
   const afterSize = useElementSize(afterCardRef);
-  const [message, setMessage] = useState("Carregando metadados do treino v1...");
+  const [message, setMessage] = useState("Carregando metadados do modelo...");
 
   useEffect(() => {
     const loadApiData = async () => {
-      try {
-        const [info, metrics, artifactPayload] = await Promise.all([
-          fetchCachedJson<ApiModelInfo>("model-info", `${API_BASE}/api/v1/model/info`),
-          fetchCachedJson<{ series: ApiTrainingMetric[] }>("training-metrics", `${API_BASE}/api/v1/training/metrics`),
-          fetchCachedJson<{ artifacts: TrainingArtifact[] }>("training-artifacts", `${API_BASE}/api/v1/training/artifacts`)
-        ]);
+      const [modelResult, summaryResult, metricsResult, artifactsResult] = await Promise.allSettled([
+        fetchFreshJson<ApiModelInfo>(`${API_BASE}/api/v1/models/current`),
+        fetchFreshJson<ApiTrainingSummary>(`${API_BASE}/api/v1/training/summary`),
+        fetchFreshJson<{ series: ApiTrainingMetric[]; source?: string }>(`${API_BASE}/api/v1/training/metrics`),
+        fetchCachedJson<{ artifacts: TrainingArtifact[] }>("training-artifacts", `${API_BASE}/api/v1/training/artifacts`)
+      ]);
+      let hasApiData = false;
+      let finalMetric: TrainingMetric | null = null;
 
-        setAnalysisModel(info.name ?? "Plant.AI YOLOv8-seg v1");
-        setTrainingMetrics(metrics.series.map(toTrainingMetric));
-        setArtifacts(artifactPayload.artifacts);
+      if (modelResult.status === "fulfilled") {
+        const info = modelResult.value;
+        setAnalysisModel(getModelDisplayName(info));
+        setDatasetVersion(info.datasetVersion ?? null);
+        setModelClassLabels(getModelClassLabels(info));
+        setModelTrainingProgress({ completed: info.training?.completedEpochs, total: info.training?.epochs });
+        setInferenceParams({
+          confidence: normalizeInferenceParam(info.inference?.defaultConfidence, defaultInferenceParams.confidence),
+          iou: normalizeInferenceParam(info.inference?.defaultIou, defaultInferenceParams.iou)
+        });
+        finalMetric = info.training?.finalMetrics ? toTrainingMetric(info.training.finalMetrics) : null;
+        hasApiData = true;
+      }
+
+      if (summaryResult.status === "fulfilled") {
+        setDatasetVersion((current) => summaryResult.value.datasetVersion ?? current);
+        finalMetric = summaryResult.value.final ? toTrainingMetric(summaryResult.value.final) : finalMetric;
+        hasApiData = true;
+      }
+
+      if (metricsResult.status === "fulfilled") {
+        const metrics = metricsResult.value.series
+          .filter((metric) => isFiniteNumber(metric.epoch))
+          .sort((left, right) => left.epoch - right.epoch)
+          .map(toTrainingMetric);
+        setTrainingMetrics(metrics);
+        finalMetric = finalMetric ?? metrics[metrics.length - 1] ?? null;
+        hasApiData = true;
+      }
+
+      if (artifactsResult.status === "fulfilled") {
+        setArtifacts(artifactsResult.value.artifacts);
+      }
+
+      setTrainingFinalMetric(finalMetric);
+      if (hasApiData) {
         setApiStatus("online");
         setMessage(`API conectada em ${API_BASE}`);
-      } catch (error) {
+      } else {
         setApiStatus("offline");
-        setMessage("API do modelo indisponível. Exibindo dados demonstrativos.");
+        setMessage("API do modelo indisponível. Os metadados não puderam ser atualizados.");
       }
     };
 
@@ -904,12 +1327,16 @@ function App() {
     [detections, selectedClass]
   );
 
-  const counts = useMemo(() => countDetectionsByClass(detections), [detections]);
+  const counts = useMemo(() => analysisCounts ?? countDetectionsByClass(detections), [analysisCounts, detections]);
 
   const confidence = getAverageConfidence(detections);
   const totalArea = detections.reduce((total, detection) => total + detection.area, 0);
   const visibleDetections = isAnalyzing ? [] : filteredDetections;
-  const lastMetric = trainingMetrics[trainingMetrics.length - 1];
+  const hasApiAnnotatedImage = Boolean(apiAnnotatedImageSrc);
+  const isApiImageSelected = analysisSource === "api" && hasApiAnnotatedImage;
+  const analysisBaseImageSrc = isApiImageSelected ? apiAnnotatedImageSrc! : originalImageSrc;
+  const shouldRenderLocalDetections = !isApiImageSelected;
+  const lastMetric = trainingFinalMetric ?? trainingMetrics[trainingMetrics.length - 1] ?? null;
   const focusDim = 0.12 + (maskFocus / 100) * 0.62;
   const focusBoost = 1.04 + (maskFocus / 100) * 0.3;
   const beforeSurface = getContainedSurface(beforeSize, imageAspect);
@@ -1000,18 +1427,24 @@ function App() {
     }
 
     setIsAnalyzing(true);
+    setAnalysisSource("visualizer");
+    setApiAnnotatedImageSrc(null);
+    setDetections([]);
+    setAnalysisCounts(null);
+    setInferenceMeasurements(null);
+    setLatencyMs(null);
     setMessage(isHeicImageFile(file) ? "Convertendo HEIC para JPG..." : "Enviando imagem para inferência na API do modelo...");
 
     try {
       const uploadFile = await prepareImageFileForUpload(file);
       const localPreview = URL.createObjectURL(uploadFile);
-      setImageSrc(localPreview);
+      setOriginalImageSrc(localPreview);
       setMessage(`Enviando ${isHeicImageFile(file) ? "JPG convertido" : "imagem"} (${formatFileSize(uploadFile.size)}) para inferência...`);
 
       const form = new FormData();
       form.append("file", uploadFile, uploadFile.name);
 
-      const response = await analyzeImageRequest(form);
+      const response = await analyzeImageRequest(form, inferenceParams);
 
       if (!response.ok) {
         throw new Error(await response.text());
@@ -1019,17 +1452,34 @@ function App() {
 
       const payload = (await response.json()) as AnalyzeResponse;
       const nextDetections = payload.detections.map(toDetection).filter(Boolean) as Detection[];
+      const nextCounts = normalizeApiCounts(payload.counts, nextDetections);
+      const inferenceDatasetVersion = typeof payload.model === "string" ? datasetVersion ?? undefined : payload.model.datasetVersion;
       const historyItem = createAnalysisHistoryItem({
         file,
         detections: nextDetections,
-        model: payload.model,
-        latencyMs: payload.latencyMs
+        counts: nextCounts,
+        model: getModelDisplayName(payload.model),
+        datasetVersion: inferenceDatasetVersion,
+        trainingMetric: lastMetric,
+        latencyMs: payload.latencyMs,
+        image: payload.image,
+        measurements: payload.measurements
       });
 
-      setImageSrc(payload.image.originalDataUrl);
+      const originalDataUrl = payload.image.originalDataUrl ?? localPreview;
+      setOriginalImageSrc(originalDataUrl);
+      setApiAnnotatedImageSrc(payload.image.annotatedDataUrl ?? null);
+      if (payload.image.width && payload.image.height) setImageAspect(payload.image.width / payload.image.height);
       setDetections(nextDetections);
+      setAnalysisCounts(nextCounts);
+      setInferenceMeasurements(payload.measurements ?? null);
       setLatencyMs(payload.latencyMs);
-      setAnalysisModel(payload.model);
+      setAnalysisModel(getModelDisplayName(payload.model));
+      if (typeof payload.model !== "string") {
+        const modelDatasetVersion = payload.model.datasetVersion;
+        setDatasetVersion((current) => modelDatasetVersion ?? current);
+        setModelClassLabels(getModelClassLabels(payload.model));
+      }
       setApiStatus("online");
       addAnalysisHistoryItem(historyItem);
       setMessage(`Inferência concluída em ${(payload.latencyMs / 1000).toFixed(2)}s`);
@@ -1086,22 +1536,23 @@ function App() {
       <header className="topbar">
         <div>
           <p className="eyebrow">Plant.AI Visualizer</p>
-          <h1>Análise visual YOLOv8-seg v1</h1>
+          <h1>Análise visual de segmentação{datasetVersion ? ` ${datasetVersion}` : ""}</h1>
         </div>
         <div className={`live-pill ${apiStatus}`}>
           <span />
-          {apiStatus === "online" ? "API conectada" : apiStatus === "loading" ? "Conectando API" : "Modo demo"}
+          {apiStatus === "online" ? "API conectada" : apiStatus === "loading" ? "Conectando API" : "API indisponível"}
         </div>
       </header>
 
       <section className="dashboard-grid">
-        <article
-          className={`analysis-stage ${isDraggingImage ? "is-dragging-image" : ""}`}
-          onDragEnter={startImageDrag}
-          onDragOver={keepImageDrag}
-          onDragLeave={stopImageDrag}
-          onDrop={dropImage}
-        >
+        <div className="main-stack">
+          <article
+            className={`analysis-stage ${isDraggingImage ? "is-dragging-image" : ""}`}
+            onDragEnter={startImageDrag}
+            onDragOver={keepImageDrag}
+            onDragLeave={stopImageDrag}
+            onDrop={dropImage}
+          >
           <div className="drop-overlay">
             <ImageUp size={28} />
             <span>Solte a imagem para analisar</span>
@@ -1109,7 +1560,7 @@ function App() {
           <div className="panel-header">
             <div>
               <p className="eyebrow">Antes e depois</p>
-              <h2>Segmentação de folhas e frutos</h2>
+              <h2>Segmentação da planta</h2>
               <p className="api-message">{message}</p>
             </div>
             <div className={`upload-actions ${isAnalyzing ? "disabled" : ""}`} aria-label="Selecionar imagem">
@@ -1126,10 +1577,10 @@ function App() {
             </div>
           </div>
 
-          <div className={`image-workbench ${viewMode}`}>
+          <div className={`image-workbench ${viewMode}`} style={{ "--image-aspect": imageAspect } as React.CSSProperties}>
             <div className="image-card before" ref={beforeCardRef}>
               <div className="image-surface" style={beforeSurface}>
-                <img src={imageSrc} alt="Imagem original da planta" onLoad={updateImageAspect} />
+                <img src={originalImageSrc} alt="Imagem original da planta" onLoad={updateImageAspect} />
               </div>
               <span>Original</span>
             </div>
@@ -1152,15 +1603,20 @@ function App() {
                     } as React.CSSProperties
                   }
                 >
-                  <img src={imageSrc} alt="Imagem com análise de segmentação" onLoad={updateImageAspect} />
-                  {viewMode !== "boxes" && visibleDetections.length > 0 && (
-                    <MaskFocusOverlay detections={visibleDetections} imageSrc={imageSrc} />
+                  <img
+                    src={analysisBaseImageSrc}
+                    alt={isApiImageSelected ? "Imagem analisada retornada pela API" : "Imagem com análise montada pelo visualizador"}
+                    onLoad={updateImageAspect}
+                  />
+                  {shouldRenderLocalDetections && viewMode !== "boxes" && visibleDetections.length > 0 && (
+                    <MaskFocusOverlay detections={visibleDetections} imageSrc={analysisBaseImageSrc} />
                   )}
                   <div className="scan-grid" />
                   <div className="scan-beam" />
-                  {visibleDetections.map((detection) => (
-                    <DetectionLayer key={detection.id} detection={detection} mode={viewMode} />
-                  ))}
+                  {shouldRenderLocalDetections &&
+                    visibleDetections.map((detection) => (
+                      <DetectionLayer key={detection.id} detection={detection} mode={viewMode} />
+                    ))}
                 </div>
               </div>
               <div className="map-controls">
@@ -1182,45 +1638,63 @@ function App() {
                     <Minus size={18} />
                   </button>
                 </div>
-                <label className="contrast-control" aria-label="Foco das máscaras">
-                  <SlidersVertical size={15} />
-                  <div
-                    className="contrast-slider"
-                    role="slider"
-                    tabIndex={0}
-                    aria-valuemin={0}
-                    aria-valuemax={100}
-                    aria-valuenow={maskFocus}
-                    onPointerDown={(event) => {
-                      event.currentTarget.setPointerCapture(event.pointerId);
-                      updateContrastFromPointer(event);
-                    }}
-                    onPointerMove={(event) => {
-                      if (event.buttons === 1) updateContrastFromPointer(event);
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key === "ArrowUp" || event.key === "ArrowRight") {
-                        setMaskFocus((current) => Math.min(100, current + 2));
-                      }
-                      if (event.key === "ArrowDown" || event.key === "ArrowLeft") {
-                        setMaskFocus((current) => Math.max(0, current - 2));
-                      }
-                    }}
-                  >
-                    <span className="contrast-track">
-                      <span className="contrast-fill" style={{ height: `${maskFocus}%` }} />
-                      <span className="contrast-thumb" style={{ bottom: `${maskFocus}%` }} />
-                    </span>
-                  </div>
-                  <strong>{maskFocus}%</strong>
-                </label>
+                {shouldRenderLocalDetections && (
+                  <label className="contrast-control" aria-label="Foco das máscaras">
+                    <SlidersVertical size={15} />
+                    <div
+                      className="contrast-slider"
+                      role="slider"
+                      tabIndex={0}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-valuenow={maskFocus}
+                      onPointerDown={(event) => {
+                        event.currentTarget.setPointerCapture(event.pointerId);
+                        updateContrastFromPointer(event);
+                      }}
+                      onPointerMove={(event) => {
+                        if (event.buttons === 1) updateContrastFromPointer(event);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "ArrowUp" || event.key === "ArrowRight") {
+                          setMaskFocus((current) => Math.min(100, current + 2));
+                        }
+                        if (event.key === "ArrowDown" || event.key === "ArrowLeft") {
+                          setMaskFocus((current) => Math.max(0, current - 2));
+                        }
+                      }}
+                    >
+                      <span className="contrast-track">
+                        <span className="contrast-fill" style={{ height: `${maskFocus}%` }} />
+                        <span className="contrast-thumb" style={{ bottom: `${maskFocus}%` }} />
+                      </span>
+                    </div>
+                    <strong>{maskFocus}%</strong>
+                  </label>
+                )}
               </div>
-              <span>{isAnalyzing ? "Processando" : "Analisada"}</span>
+              <span>{isAnalyzing ? "Processando" : isApiImageSelected ? "Foto da API" : "Visualizador"}</span>
             </div>
           </div>
 
           <div className="control-strip">
             <Segmented
+              ariaLabel="Fonte da análise"
+              value={analysisSource}
+              options={[
+                { value: "visualizer", label: "Visualizador", icon: <Layers3 size={16} /> },
+                {
+                  value: "api",
+                  label: "Foto da API",
+                  icon: <Images size={16} />,
+                  disabled: !hasApiAnnotatedImage,
+                  title: hasApiAnnotatedImage ? undefined : "A API não retornou uma imagem anotada"
+                }
+              ]}
+              onChange={setAnalysisSource}
+            />
+            <Segmented
+              ariaLabel="Modo de visualização"
               value={viewMode}
               options={[
                 { value: "compare", label: "Comparar", icon: <Eye size={16} /> },
@@ -1230,42 +1704,97 @@ function App() {
               onChange={setViewMode}
             />
             <Segmented
+              ariaLabel="Filtrar classes"
               value={selectedClass}
-              options={[
-                { value: "todas", label: "Todas", icon: <Sparkles size={16} /> },
-                { value: "folha", label: "Folhas", icon: <Leaf size={16} /> },
-                { value: "fruto", label: "Frutos", icon: <CircleDot size={16} /> }
-              ]}
+              options={classFilterOptions}
               onChange={setSelectedClass}
             />
           </div>
-        </article>
+          </article>
 
-        <aside className="side-stack">
-          <div className="metric-grid">
-            <Metric label="Folhas" value={isAnalyzing ? "-" : counts.folha} color="#42f58d" />
-            <Metric label="Frutos" value={isAnalyzing ? "-" : counts.fruto} color="#ff5c7a" />
-            <Metric label="Confiança" value={isAnalyzing ? "-" : `${Math.round(confidence * 100)}%`} color="#69c8ff" />
-            <Metric label="Área seg." value={isAnalyzing ? "-" : `${totalArea.toFixed(1)}%`} color="#f2d66d" />
-          </div>
+          <InferenceMeasurementsPanel
+            isExpanded={isMeasurementsExpanded}
+            measurements={inferenceMeasurements}
+            isAnalyzing={isAnalyzing}
+            onToggle={() => setIsMeasurementsExpanded((current) => !current)}
+          />
 
-          <section className="data-panel">
-            <PanelTitle icon={<BarChart3 size={18} />} title="Contagem por classe" />
-            {isAnalyzing ? (
-              <div className="processing-state">Em processamento</div>
-            ) : (
-              <BarChart
-                data={[
-                  { label: "Folhas", value: counts.folha, color: "#42f58d" },
-                  { label: "Frutos", value: counts.fruto, color: "#ff5c7a" }
-                ]}
-              />
-            )}
+          <section className="bottom-grid">
+            <article className="data-panel instances-panel">
+              <div className="panel-title-row">
+                <PanelTitle icon={<ScanLine size={18} />} title="Instâncias detectadas" />
+                <div className="panel-actions">
+                  <span>{isAnalyzing ? "Processando" : `${detections.length} instâncias`}</span>
+                  <button
+                    aria-expanded={isInstancesExpanded}
+                    aria-label={isInstancesExpanded ? "Recolher instâncias detectadas" : "Expandir instâncias detectadas"}
+                    className="expand-button"
+                    onClick={() => setIsInstancesExpanded((current) => !current)}
+                    type="button"
+                  >
+                    <ChevronDown size={17} />
+                  </button>
+                </div>
+              </div>
+              {isInstancesExpanded && (
+                isAnalyzing ? (
+                  <div className="processing-state">Em processamento</div>
+                ) : (
+                  <div className="instance-list expandable-content">
+                    {detections.map((detection) => (
+                      <InstanceRow key={detection.id} detection={detection} />
+                    ))}
+                  </div>
+                )
+              )}
+            </article>
+
+            <article className="data-panel">
+              <div className="panel-title-row">
+                <PanelTitle icon={<Layers3 size={18} />} title="Modelo e artefatos" />
+                <div className="panel-actions">
+                  <button
+                    aria-expanded={isArtifactsExpanded}
+                    aria-label={isArtifactsExpanded ? "Recolher modelo e artefatos" : "Expandir modelo e artefatos"}
+                    className="expand-button"
+                    onClick={() => setIsArtifactsExpanded((current) => !current)}
+                    type="button"
+                  >
+                    <ChevronDown size={17} />
+                  </button>
+                </div>
+              </div>
+              {isArtifactsExpanded && (
+                <>
+                  <div className="expandable-content">
+                    <div className="model-summary">
+                      <strong>{analysisModel || "Modelo não informado pela API"}</strong>
+                      {datasetVersion && <span>Dataset: {datasetVersion}</span>}
+                      {isFiniteNumber(modelTrainingProgress.completed) && isFiniteNumber(modelTrainingProgress.total) && (
+                        <span>Épocas: {modelTrainingProgress.completed}/{modelTrainingProgress.total}</span>
+                      )}
+                      <span>
+                        Inferência: confiança {(inferenceParams.confidence * 100).toFixed(0)}%, IoU {(inferenceParams.iou * 100).toFixed(0)}%
+                      </span>
+                      <span>{latencyMs ? `Última inferência: ${(latencyMs / 1000).toFixed(2)}s` : "Aguardando upload"}</span>
+                      {modelClassLabels.length > 0 && <span>Classes: {modelClassLabels.join(", ")}</span>}
+                    </div>
+                    <ArtifactGrid artifacts={artifacts} />
+                  </div>
+                </>
+              )}
+            </article>
           </section>
 
-          <section className="data-panel">
-            <PanelTitle icon={<Activity size={18} />} title="Treinamento v1" />
-            <LineChart data={trainingMetrics} />
+          <section className="data-panel training-panel-wide">
+            <PanelTitle icon={<Activity size={18} />} title={`Treinamento${datasetVersion ? ` ${datasetVersion}` : ""}`} />
+            {trainingMetrics.length ? (
+              <LineChart data={trainingMetrics} />
+            ) : (
+              <div className="processing-state">
+                {apiStatus === "loading" ? "Carregando métricas" : "Métricas indisponíveis"}
+              </div>
+            )}
             <div className="training-note">
               <CheckCircle2 size={16} />
               <span>
@@ -1276,6 +1805,32 @@ function App() {
                   : "Aguardando métricas do treino."}
               </span>
             </div>
+          </section>
+        </div>
+
+        <aside className="side-stack">
+          <div className="metric-grid">
+            <Metric label="Plantas" value={isAnalyzing ? "-" : counts.planta_inteira} color={classStyle.planta_inteira.color} />
+            <Metric label="Folhas" value={isAnalyzing ? "-" : counts.folha} color={classStyle.folha.color} />
+            <Metric label="Frutos" value={isAnalyzing ? "-" : counts.fruto} color={classStyle.fruto.color} />
+            <Metric label="Marcadores" value={isAnalyzing ? "-" : counts.marcador_aruco} color={classStyle.marcador_aruco.color} />
+            <Metric label="Confiança" value={isAnalyzing ? "-" : `${Math.round(confidence * 100)}%`} color="#69c8ff" />
+            <Metric label="Área seg." value={isAnalyzing ? "-" : `${totalArea.toFixed(1)}%`} color="#f2d66d" />
+          </div>
+
+          <section className="data-panel">
+            <PanelTitle icon={<BarChart3 size={18} />} title="Contagem por classe" />
+            {isAnalyzing ? (
+              <div className="processing-state">Em processamento</div>
+            ) : (
+              <BarChart
+                data={displayClasses.map((className) => ({
+                  label: classStyle[className].pluralLabel,
+                  value: counts[className],
+                  color: classStyle[className].color
+                }))}
+              />
+            )}
           </section>
 
           <AnalysisHistoryPanel
@@ -1289,63 +1844,6 @@ function App() {
             onExportXlsx={() => handleExportHistory("xlsx")}
           />
         </aside>
-      </section>
-
-      <section className="bottom-grid">
-        <article className="data-panel instances-panel">
-          <div className="panel-title-row">
-            <PanelTitle icon={<ScanLine size={18} />} title="Instâncias detectadas" />
-            <div className="panel-actions">
-              <span>{isAnalyzing ? "Processando" : `${detections.length} instâncias`}</span>
-              <button
-                aria-expanded={isInstancesExpanded}
-                aria-label={isInstancesExpanded ? "Recolher instâncias detectadas" : "Expandir instâncias detectadas"}
-                className="expand-button"
-                onClick={() => setIsInstancesExpanded((current) => !current)}
-                type="button"
-              >
-                <ChevronDown size={17} />
-              </button>
-            </div>
-          </div>
-          {isInstancesExpanded && (
-            isAnalyzing ? (
-              <div className="processing-state">Em processamento</div>
-            ) : (
-              <div className="instance-list">
-                {detections.map((detection) => (
-                  <InstanceRow key={detection.id} detection={detection} />
-                ))}
-              </div>
-            )
-          )}
-        </article>
-
-        <article className="data-panel">
-          <div className="panel-title-row">
-            <PanelTitle icon={<Layers3 size={18} />} title="Modelo e artefatos" />
-            <div className="panel-actions">
-              <button
-                aria-expanded={isArtifactsExpanded}
-                aria-label={isArtifactsExpanded ? "Recolher modelo e artefatos" : "Expandir modelo e artefatos"}
-                className="expand-button"
-                onClick={() => setIsArtifactsExpanded((current) => !current)}
-                type="button"
-              >
-                <ChevronDown size={17} />
-              </button>
-            </div>
-          </div>
-          {isArtifactsExpanded && (
-            <>
-              <div className="model-summary">
-                <strong>{analysisModel}</strong>
-                <span>{latencyMs ? `Última inferência: ${(latencyMs / 1000).toFixed(2)}s` : "Aguardando upload"}</span>
-              </div>
-              <ArtifactGrid artifacts={artifacts} />
-            </>
-          )}
-        </article>
       </section>
     </main>
   );
@@ -1371,7 +1869,7 @@ function AnalysisHistoryPanel({
   onExportXlsx: () => void;
 }) {
   const savedLabel = `${history.length} ${history.length === 1 ? "salva" : "salvas"}`;
-  const latestItems = history.slice(0, 3);
+  const latestItems = history.slice(0, 5);
 
   return (
     <section className="data-panel history-panel">
@@ -1432,6 +1930,238 @@ function AnalysisHistoryPanel({
   );
 }
 
+const measurementNumberFormatter = new Intl.NumberFormat("pt-BR", {
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 2
+});
+const preciseMeasurementNumberFormatter = new Intl.NumberFormat("pt-BR", {
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 3
+});
+
+const formatMeasurementNumber = (value: number | undefined, precise = false) =>
+  isFiniteNumber(value) ? (precise ? preciseMeasurementNumberFormatter : measurementNumberFormatter).format(value) : null;
+
+const formatLinearMeasurement = (value: number | undefined, unit?: string) => {
+  const normalizedValue = unit === "mm" ? value === undefined ? undefined : value / 10 : value;
+  const formatted = formatMeasurementNumber(normalizedValue);
+  if (!formatted) return null;
+  if (unit === "image_percent") return `${formatted}%`;
+  if (unit === "px") return `${formatted} px`;
+  if (unit === "mm") return `${formatted} cm`;
+  return unit ? `${formatted} ${unit}` : formatted;
+};
+
+const formatAreaMeasurement = (value: number | undefined, unit?: string) => {
+  const normalizedValue = unit === "mm" || unit === "mm2" || unit === "mm²" ? value === undefined ? undefined : value / 100 : value;
+  const formatted = formatMeasurementNumber(normalizedValue, true);
+  if (!formatted) return null;
+  if (unit === "image_percent") return `${formatted}% da imagem`;
+  if (unit === "px") return `${formatted} px²`;
+  if (unit === "mm" || unit === "mm2" || unit === "mm²") return `${formatted} cm²`;
+  return unit ? `${formatted} ${unit}` : formatted;
+};
+
+const humanizeApiValue = (value: string) =>
+  value
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+
+const fruitStateLabels: Record<string, string> = {
+  verde: "Verde",
+  green: "Verde",
+  em_maturacao: "Em maturação",
+  maturando: "Em maturação",
+  ripening: "Em maturação",
+  maduro: "Maduro",
+  ripe: "Maduro",
+  indefinido: "Indefinido",
+  undefined: "Indefinido",
+  unknown: "Indefinido"
+};
+
+const scaleReasonLabels: Record<string, string> = {
+  no_aruco_marker_detected: "Nenhum marcador ArUco detectado.",
+  missing_marker_size_mm: "Tamanho físico do marcador não configurado.",
+  missing_marker_size: "Tamanho físico do marcador não configurado."
+};
+
+function InferenceMeasurementsPanel({
+  isExpanded,
+  measurements,
+  isAnalyzing,
+  onToggle
+}: {
+  isExpanded: boolean;
+  measurements: InferenceMeasurements | null;
+  isAnalyzing: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <section className={`data-panel measurements-panel ${isExpanded ? "is-expanded" : ""}`}>
+      <div className="panel-title-row">
+        <PanelTitle icon={<Ruler size={18} />} title="Medições da inferência" />
+        <div className="panel-actions">
+          <button
+            aria-expanded={isExpanded}
+            aria-label={isExpanded ? "Recolher medições da inferência" : "Expandir medições da inferência"}
+            className="expand-button"
+            onClick={onToggle}
+            type="button"
+          >
+            <ChevronDown size={17} />
+          </button>
+        </div>
+      </div>
+      {isExpanded && (
+        isAnalyzing ? (
+          <div className="processing-state">Calculando medições</div>
+        ) : measurements ? (
+          <div className="measurement-list expandable-content">
+            <ScaleMeasurementRow scale={measurements.scale} />
+            <HeightMeasurementRow measurement={measurements.plantHeight} />
+            <SizeMeasurementRow className="fruto" measurement={measurements.fruitSize} title="Frutos" />
+            <SizeMeasurementRow className="folha" measurement={measurements.leafSize} title="Folhas" />
+            <FruitStatesRow states={measurements.fruitStates} />
+          </div>
+        ) : (
+          <p className="empty-state">As medições aparecerão após uma inferência.</p>
+        )
+      )}
+    </section>
+  );
+}
+
+function ScaleMeasurementRow({ scale }: { scale?: ScaleMeasurement }) {
+  if (!scale) return null;
+  const markerDetails = [
+    scale.dictionary,
+    isFiniteNumber(scale.configuredMarkerSizeMm) ? `${formatMeasurementNumber(scale.configuredMarkerSizeMm)} mm` : null,
+    scale.markerIds?.length ? `IDs ${scale.markerIds.join(", ")}` : null
+  ].filter(Boolean);
+
+  return (
+    <div className="measurement-row calibration-row">
+      <div className="measurement-heading">
+        <strong>Escala</strong>
+        <span className={scale.calibrated ? "measurement-status calibrated" : "measurement-status"}>
+          {scale.calibrated ? "Calibrada" : "Relativa"}
+        </span>
+      </div>
+      {!scale.calibrated && <p>{scaleReasonLabels[scale.reason ?? ""] ?? "Escala física indisponível."}</p>}
+      {scale.calibrated && isFiniteNumber(scale.mmPerPixel) && (
+        <p>{formatMeasurementNumber(scale.mmPerPixel, true)} mm por pixel</p>
+      )}
+      {markerDetails.length > 0 && <small>{markerDetails.join(" · ")}</small>}
+    </div>
+  );
+}
+
+function HeightMeasurementRow({ measurement }: { measurement?: HeightMeasurement }) {
+  if (!measurement) return null;
+  const count = isFiniteNumber(measurement.count) ? measurement.count : null;
+
+  if (count === 0) {
+    return <EmptyMeasurementRow title="Altura das plantas" message="Nenhuma planta medida" />;
+  }
+
+  const physicalAverage = formatLinearMeasurement(measurement.real?.average, measurement.real?.unit);
+  const physicalMax = formatLinearMeasurement(measurement.real?.max, measurement.real?.unit);
+  const relativeAverage = formatLinearMeasurement(measurement.average, measurement.unit);
+  const relativeMax = formatLinearMeasurement(measurement.max, measurement.unit);
+  const pixelAverage = formatLinearMeasurement(measurement.pixel?.average, measurement.pixel?.unit ?? "px");
+  const pixelMax = formatLinearMeasurement(measurement.pixel?.max, measurement.pixel?.unit ?? "px");
+
+  return (
+    <div className="measurement-row">
+      <div className="measurement-heading">
+        <strong>Altura das plantas</strong>
+        {count !== null && <span>{count} medidas</span>}
+      </div>
+      {(physicalAverage || relativeAverage) && (
+        <p>Média {physicalAverage ?? relativeAverage} · máxima {physicalMax ?? relativeMax ?? "não disponível"}</p>
+      )}
+      {physicalAverage && relativeAverage && <small>Relativa: {relativeAverage} · máxima {relativeMax}</small>}
+      {pixelAverage && <small>Pixels: {pixelAverage} · máxima {pixelMax ?? "não disponível"}</small>}
+    </div>
+  );
+}
+
+function SizeMeasurementRow({
+  className,
+  measurement,
+  title
+}: {
+  className: "folha" | "fruto";
+  measurement?: SizeMeasurement;
+  title: string;
+}) {
+  if (!measurement) return null;
+  const count = isFiniteNumber(measurement.count) ? measurement.count : null;
+  if (count === 0) return <EmptyMeasurementRow title={title} message={`Nenhum${className === "folha" ? "a" : ""} ${className} medid${className === "folha" ? "a" : "o"}`} />;
+
+  const realWidth = formatLinearMeasurement(measurement.real?.averageWidth, measurement.real?.unit);
+  const realHeight = formatLinearMeasurement(measurement.real?.averageHeight, measurement.real?.unit);
+  const realArea = formatAreaMeasurement(measurement.real?.averageAreaMm2, "mm2");
+  const relativeWidth = formatLinearMeasurement(measurement.averageWidth, measurement.unit);
+  const relativeHeight = formatLinearMeasurement(measurement.averageHeight, measurement.unit);
+  const relativeArea = formatAreaMeasurement(measurement.averageArea, measurement.unit);
+  const pixelWidth = formatLinearMeasurement(measurement.pixel?.averageWidth, measurement.pixel?.unit ?? "px");
+  const pixelHeight = formatLinearMeasurement(measurement.pixel?.averageHeight, measurement.pixel?.unit ?? "px");
+  const pixelArea = formatAreaMeasurement(measurement.pixel?.averageArea, measurement.pixel?.unit ?? "px");
+
+  return (
+    <div className="measurement-row">
+      <div className="measurement-heading">
+        <strong>{title}</strong>
+        {count !== null && <span>{count} medidas</span>}
+      </div>
+      {(realWidth || relativeWidth) && (
+        <p>
+          Média {realWidth ?? relativeWidth} × {realHeight ?? relativeHeight ?? "não disponível"}
+          {(realArea ?? relativeArea) ? ` · área ${realArea ?? relativeArea}` : ""}
+        </p>
+      )}
+      {realWidth && relativeWidth && <small>Relativa: {relativeWidth} × {relativeHeight} · área {relativeArea}</small>}
+      {pixelWidth && <small>Pixels: {pixelWidth} × {pixelHeight} · área {pixelArea}</small>}
+    </div>
+  );
+}
+
+function EmptyMeasurementRow({ title, message }: { title: string; message: string }) {
+  return (
+    <div className="measurement-row">
+      <div className="measurement-heading">
+        <strong>{title}</strong>
+      </div>
+      <p>{message}</p>
+    </div>
+  );
+}
+
+function FruitStatesRow({ states }: { states?: InferenceMeasurements["fruitStates"] }) {
+  const counts = states?.counts;
+  if (!counts || !Object.keys(counts).length) return null;
+  const entries = Object.entries(counts)
+    .filter(([, count]) => isFiniteNumber(count))
+    .sort((left, right) => right[1] - left[1]);
+  if (!entries.length) return null;
+
+  return (
+    <div className="measurement-row">
+      <div className="measurement-heading">
+        <strong>Estado dos frutos</strong>
+        {states?.method && <span>{states.method === "lab_color_heuristic" ? "Cor CIELAB" : humanizeApiValue(states.method)}</span>}
+      </div>
+      <div className="state-counts">
+        {entries.map(([state, count]) => (
+          <span key={state}>{fruitStateLabels[state] ?? humanizeApiValue(state)} <strong>{count}</strong></span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function toTrainingMetric(item: ApiTrainingMetric): TrainingMetric {
   return {
     epoch: item.epoch,
@@ -1443,18 +2173,21 @@ function toTrainingMetric(item: ApiTrainingMetric): TrainingMetric {
 }
 
 function toDetection(item: ApiDetection): Detection | null {
-  if (item.className !== "folha" && item.className !== "fruto") {
-    return null;
-  }
+  const className = toKnownClassName(item.className);
+  if (!className) return null;
+  const area = item.area ?? item.size?.imagePercent?.area ?? (item.bbox.w * item.bbox.h) / 100;
 
   return {
     id: item.id,
-    className: item.className,
+    className,
     confidence: item.confidence,
     bbox: item.bbox,
-    mask: item.mask.map((point) => `${point.x}% ${point.y}%`).join(", "),
-    area: item.area,
-    lab: item.lab
+    mask: item.mask?.map((point) => `${point.x}% ${point.y}%`).join(", ") ?? "",
+    area,
+    lab: item.lab ?? { l: 0, a: 0, b: 0 },
+    parentId: item.parentId,
+    state: item.state,
+    size: item.size
   };
 }
 
@@ -1494,10 +2227,12 @@ function DetectionLayer({ detection, mode }: { detection: Detection; mode: ViewM
 }
 
 function MaskFocusOverlay({ detections, imageSrc }: { detections: Detection[]; imageSrc: string }) {
+  const maskedDetections = detections.filter((detection) => detection.mask);
+
   return (
     <div className="mask-focus-layer" aria-hidden="true">
       <div className="mask-dim" />
-      {detections.map((detection) => (
+      {maskedDetections.map((detection) => (
         <div
           className="mask-spotlight"
           key={detection.id}
@@ -1600,21 +2335,22 @@ function BarChart({ data }: { data: Array<{ label: string; value: number; color:
 }
 
 function LineChart({ data }: { data: TrainingMetric[] }) {
+  if (!data.length) return null;
   const width = 420;
   const height = 170;
   const padding = 18;
-  const safeData = data.length > 1 ? data : initialTrainingMetrics;
-  const maxLoss = Math.max(1, ...safeData.map((item) => item.loss));
-  const points = safeData
+  const divisor = Math.max(1, data.length - 1);
+  const maxLoss = Math.max(1, ...data.map((item) => item.loss));
+  const points = data
     .map((item, index) => {
-      const x = padding + (index / (safeData.length - 1)) * (width - padding * 2);
+      const x = data.length === 1 ? width / 2 : padding + (index / divisor) * (width - padding * 2);
       const y = height - padding - item.map50 * (height - padding * 2);
       return `${x},${y}`;
     })
     .join(" ");
-  const lossPoints = safeData
+  const lossPoints = data
     .map((item, index) => {
-      const x = padding + (index / (safeData.length - 1)) * (width - padding * 2);
+      const x = data.length === 1 ? width / 2 : padding + (index / divisor) * (width - padding * 2);
       const normalizedLoss = Math.min(item.loss / maxLoss, 1);
       const y = padding + normalizedLoss * (height - padding * 2);
       return `${x},${y}`;
@@ -1622,11 +2358,11 @@ function LineChart({ data }: { data: TrainingMetric[] }) {
     .join(" ");
 
   return (
-    <svg className="line-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Curva de treino v1">
+    <svg className="line-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Curva de treinamento do modelo atual">
       <polyline points={lossPoints} fill="none" stroke="#ffb86b" strokeWidth="3" opacity=".75" />
       <polyline points={points} fill="none" stroke="#42f58d" strokeWidth="4" />
-      {safeData.map((item, index) => {
-        const x = padding + (index / (safeData.length - 1)) * (width - padding * 2);
+      {data.map((item, index) => {
+        const x = data.length === 1 ? width / 2 : padding + (index / divisor) * (width - padding * 2);
         const y = height - padding - item.map50 * (height - padding * 2);
         return <circle key={`${item.epoch}-${index}`} cx={x} cy={y} r="4" fill="#f5fff9" />;
       })}
@@ -1686,6 +2422,16 @@ function CachedArtifactLink({ artifact }: { artifact: TrainingArtifact }) {
 
 function InstanceRow({ detection }: { detection: Detection }) {
   const theme = classStyle[detection.className];
+  const relativeWidth = formatLinearMeasurement(detection.size?.imagePercent?.width, "image_percent");
+  const relativeHeight = formatLinearMeasurement(detection.size?.imagePercent?.height, "image_percent");
+  const relativeArea = formatAreaMeasurement(detection.size?.imagePercent?.area, "image_percent");
+  const pixelWidth = formatLinearMeasurement(detection.size?.pixel?.width, detection.size?.pixel?.unit ?? "px");
+  const pixelHeight = formatLinearMeasurement(detection.size?.pixel?.height, detection.size?.pixel?.unit ?? "px");
+  const pixelArea = formatAreaMeasurement(detection.size?.pixel?.area, detection.size?.pixel?.unit ?? "px");
+  const realWidth = formatLinearMeasurement(detection.size?.real?.width, detection.size?.real?.unit);
+  const realHeight = formatLinearMeasurement(detection.size?.real?.height, detection.size?.real?.unit);
+  const realArea = formatAreaMeasurement(detection.size?.real?.areaMm2, "mm2");
+  const parentLabel = detection.parentId?.replace(/^planta_inteira-/, "Planta ");
 
   return (
     <div className="instance-row">
@@ -1694,8 +2440,18 @@ function InstanceRow({ detection }: { detection: Detection }) {
         {theme.label}
       </div>
       <strong>{Math.round(detection.confidence * 100)}%</strong>
-      <small>
-        L* {detection.lab.l} | a* {detection.lab.a} | b* {detection.lab.b}
+      <small className="instance-details">
+        {realWidth && <span>Real: {realWidth} × {realHeight} · área {realArea}</span>}
+        {relativeWidth && <span>Imagem: {relativeWidth} × {relativeHeight} · área {relativeArea}</span>}
+        {pixelWidth && <span>Pixels: {pixelWidth} × {pixelHeight} · área {pixelArea}</span>}
+        <span>CIELAB: L* {detection.lab.l} · a* {detection.lab.a} · b* {detection.lab.b}</span>
+        {(detection.state || parentLabel) && (
+          <span>
+            {detection.state && `Estado: ${fruitStateLabels[detection.state] ?? humanizeApiValue(detection.state)}`}
+            {detection.state && parentLabel ? " · " : ""}
+            {parentLabel && `Associada a ${parentLabel}`}
+          </span>
+        )}
       </small>
     </div>
   );
@@ -1711,21 +2467,26 @@ function PanelTitle({ icon, title }: { icon: React.ReactNode; title: string }) {
 }
 
 function Segmented<T extends string>({
+  ariaLabel,
   value,
   options,
   onChange
 }: {
+  ariaLabel: string;
   value: T;
-  options: Array<{ value: T; label: string; icon: React.ReactNode }>;
+  options: Array<{ value: T; label: string; icon: React.ReactNode; disabled?: boolean; title?: string }>;
   onChange: (value: T) => void;
 }) {
   return (
-    <div className="segmented">
+    <div className="segmented" role="group" aria-label={ariaLabel}>
       {options.map((option) => (
         <button
+          aria-pressed={option.value === value}
           className={option.value === value ? "active" : ""}
+          disabled={option.disabled}
           key={option.value}
           onClick={() => onChange(option.value)}
+          title={option.title}
           type="button"
         >
           {option.icon}

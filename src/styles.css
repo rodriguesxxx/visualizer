@@ -14,6 +14,7 @@
 body {
   margin: 0;
   min-width: 320px;
+  background: #07110d;
 }
 
 button,
@@ -24,10 +25,12 @@ input {
 .app-shell {
   min-height: 100vh;
   padding: 28px;
+  background-color: #07110d;
   background:
     radial-gradient(circle at 12% 10%, rgba(66, 245, 141, 0.2), transparent 27%),
     radial-gradient(circle at 85% 8%, rgba(105, 200, 255, 0.18), transparent 26%),
     linear-gradient(135deg, #07110d 0%, #111b19 45%, #171015 100%);
+  background-attachment: fixed;
 }
 
 .topbar {
@@ -105,19 +108,26 @@ h2 {
   box-shadow: 0 0 20px #69c8ff;
 }
 
-.dashboard-grid,
-.bottom-grid {
+.dashboard-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.55fr) minmax(360px, 0.75fr);
+  align-items: start;
   gap: 20px;
   max-width: 1480px;
   margin: 0 auto;
 }
 
+.main-stack {
+  display: grid;
+  gap: 20px;
+  min-width: 0;
+}
+
 .bottom-grid {
-  grid-template-columns: minmax(0, 1.2fr) minmax(360px, 0.8fr);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.7fr);
   align-items: start;
-  margin-top: 20px;
+  gap: 20px;
 }
 
 .analysis-stage,
@@ -215,12 +225,14 @@ h2 {
 .image-workbench {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  min-height: 500px;
+  min-height: 0;
 }
 
 .image-workbench.masks,
 .image-workbench.boxes {
   grid-template-columns: 1fr;
+  max-height: min(68vh, 640px);
+  overflow: hidden;
 }
 
 .image-workbench.masks .before,
@@ -230,7 +242,10 @@ h2 {
 
 .image-card {
   position: relative;
-  min-height: 500px;
+  min-height: 0;
+  aspect-ratio: var(--image-aspect, 1.55);
+  max-height: min(68vh, 640px);
+  width: 100%;
   overflow: hidden;
   isolation: isolate;
   display: grid;
@@ -542,6 +557,11 @@ h2 {
   color: #07110d;
 }
 
+.segmented button:disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
+}
+
 .side-stack {
   display: grid;
   gap: 14px;
@@ -666,6 +686,119 @@ h2 {
   text-transform: uppercase;
 }
 
+.measurement-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 18px;
+  border-top: 1px solid rgba(244, 255, 248, 0.1);
+}
+
+.measurements-panel:not(.is-expanded) .panel-title-row {
+  margin-bottom: 0;
+}
+
+.expandable-content {
+  max-height: 360px;
+  overflow: auto;
+  padding-right: 6px;
+  scrollbar-color: rgba(105, 200, 255, 0.48) rgba(244, 255, 248, 0.08);
+  scrollbar-width: thin;
+}
+
+.expandable-content::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.expandable-content::-webkit-scrollbar-track {
+  background: rgba(244, 255, 248, 0.08);
+  border-radius: 999px;
+}
+
+.expandable-content::-webkit-scrollbar-thumb {
+  background: rgba(105, 200, 255, 0.48);
+  border-radius: 999px;
+}
+
+.measurement-row {
+  display: grid;
+  gap: 7px;
+  padding: 14px 0;
+  border-bottom: 1px solid rgba(244, 255, 248, 0.1);
+}
+
+.measurement-row:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.measurement-row:nth-last-child(2) {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.measurement-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.measurement-heading strong {
+  color: #f4fff8;
+  font-size: 0.88rem;
+}
+
+.measurement-heading > span {
+  color: #9dbbac;
+  font-size: 0.72rem;
+  font-weight: 850;
+  text-align: right;
+}
+
+.measurement-row p,
+.measurement-row small {
+  margin: 0;
+  color: #dfffee;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.measurement-row small {
+  color: #9dbbac;
+}
+
+.measurement-status {
+  padding: 4px 7px;
+  border: 1px solid rgba(255, 184, 107, 0.34);
+  border-radius: 6px;
+  color: #ffcb91 !important;
+}
+
+.measurement-status.calibrated {
+  border-color: rgba(66, 245, 141, 0.34);
+  color: #8bf8b8 !important;
+}
+
+.state-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.state-counts > span {
+  padding: 5px 7px;
+  border: 1px solid rgba(105, 200, 255, 0.2);
+  border-radius: 6px;
+  color: #bfe8ff;
+  font-size: 0.74rem;
+}
+
+.state-counts strong {
+  margin-left: 4px;
+  color: #f4fff8;
+}
+
 .line-chart {
   width: 100%;
   min-height: 160px;
@@ -674,6 +807,10 @@ h2 {
     linear-gradient(rgba(244, 255, 248, 0.06) 1px, transparent 1px),
     linear-gradient(90deg, rgba(244, 255, 248, 0.06) 1px, transparent 1px);
   background-size: 42px 42px;
+}
+
+.training-panel-wide .line-chart {
+  min-height: 220px;
 }
 
 .training-note {
@@ -927,6 +1064,12 @@ h2 {
   overflow-wrap: anywhere;
 }
 
+.instance-details {
+  display: grid;
+  gap: 5px;
+  line-height: 1.4;
+}
+
 .pipeline {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1027,22 +1170,23 @@ h2 {
     grid-template-columns: 1fr;
   }
 
-  .image-card {
-    min-height: 360px;
-  }
-
   .map-controls {
     right: 10px;
     top: 10px;
   }
 
-  .image-workbench.compare .before {
-    min-height: 250px;
-  }
-
   .metric-grid,
   .pipeline {
     grid-template-columns: 1fr;
+  }
+
+  .measurement-list {
+    grid-template-columns: 1fr;
+  }
+
+  .measurement-row:nth-last-child(2) {
+    padding-bottom: 14px;
+    border-bottom: 1px solid rgba(244, 255, 248, 0.1);
   }
 
   .instance-list {
