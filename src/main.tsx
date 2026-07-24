@@ -183,6 +183,7 @@ type AnalyzeResponse = {
   };
   counts: Record<string, number>;
   detections: ApiDetection[];
+  thresholds?: InferenceParams;
   measurements?: InferenceMeasurements;
 };
 
@@ -259,6 +260,10 @@ const publicAssetBaseUrl = appBaseUrl.endsWith("/") ? appBaseUrl : `${appBaseUrl
 const API_BASE = (viteEnv?.VITE_MODEL_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
 const defaultInferenceParams: InferenceParams = { confidence: 0.25, iou: 0.7 };
 const inferenceTimeoutMs = 90_000;
+const maxUploadMiB = 10;
+const maxUploadBytes = maxUploadMiB * 1024 * 1024;
+const maxOriginalImageMegapixels = 24;
+const maxOriginalImagePixels = maxOriginalImageMegapixels * 1_000_000;
 const maxConvertedImageSide = 1280;
 const jpegQuality = 0.82;
 const apiCacheTtlMs = 12 * 60 * 60 * 1000;
@@ -402,6 +407,25 @@ const classFilterOptions: Array<{ value: ClassName | "todas"; label: string; ico
 const imageAccept = "image/*,.heic,.heif";
 const heicExtensions = [".heic", ".heif"];
 
+class UploadLimitError extends Error {
+  readonly status = 413;
+
+  constructor(message: string) {
+    super(`413 — ${message}`);
+    this.name = "UploadLimitError";
+  }
+}
+
+class ApiResponseError extends Error {
+  constructor(
+    readonly status: number,
+    message: string
+  ) {
+    super(message);
+    this.name = "ApiResponseError";
+  }
+}
+
 const isSupportedImageFile = (file: File) => {
   const filename = file.name.toLowerCase();
   return file.type.startsWith("image/") || heicExtensions.some((extension) => filename.endsWith(extension));
@@ -418,9 +442,46 @@ const loadImageElement = (url: string) =>
   new Promise<HTMLImageElement>((resolve, reject) => {
     const image = new Image();
     image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error("Não foi possível preparar o JPG convertido."));
+    image.onerror = () => reject(new Error("Não foi possível ler as dimensões da imagem."));
     image.src = url;
   });
+
+const assertUploadSize = (file: File) => {
+  if (file.size <= maxUploadBytes) return;
+  throw new UploadLimitError(`a imagem excede o limite de ${maxUploadMiB} MiB.`);
+};
+
+const assertOriginalImageDimensions = (width: number, height: number) => {
+  const pixels = width * height;
+  if (pixels <= maxOriginalImagePixels) return;
+
+  const megapixels = (pixels / 1_000_000).toLocaleString("pt-BR", {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1
+  });
+  throw new UploadLimitError(
+    `a imagem original tem ${megapixels} MP e excede o limite de ${maxOriginalImageMegapixels} MP.`
+  );
+};
+
+const readImageDimensions = async (blob: Blob) => {
+  let bitmap: ImageBitmap | null = null;
+  let objectUrl: string | null = null;
+
+  try {
+    try {
+      bitmap = await createImageBitmap(blob);
+      return { width: bitmap.width, height: bitmap.height };
+    } catch (error) {
+      objectUrl = URL.createObjectURL(blob);
+      const image = await loadImageElement(objectUrl);
+      return { width: image.naturalWidth || image.width, height: image.naturalHeight || image.height };
+    }
+  } finally {
+    bitmap?.close();
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+  }
+};
 
 const canvasToJpegBlob = (canvas: HTMLCanvasElement) =>
   new Promise<Blob>((resolve, reject) => {
@@ -450,6 +511,7 @@ const normalizeJpegBlob = async (blob: Blob, filename: string) => {
       source = await loadImageElement(objectUrl);
     }
 
+    assertOriginalImageDimensions(source.width, source.height);
     const scale = Math.min(1, maxConvertedImageSide / Math.max(source.width, source.height));
     const canvas = document.createElement("canvas");
     canvas.width = Math.max(1, Math.round(source.width * scale));
@@ -475,13 +537,23 @@ const convertHeicToJpeg = async (file: File) => {
     if (!jpegBlob) throw new Error("HEIC sem imagem válida.");
     return normalizeJpegBlob(jpegBlob, getJpegFilename(file.name));
   } catch (error) {
+    if (error instanceof UploadLimitError) throw error;
     throw new Error("Não foi possível converter HEIC para JPG.");
   }
 };
 
-const prepareImageFileForUpload = (file: File) => {
-  if (!isHeicImageFile(file)) return Promise.resolve(file);
-  return convertHeicToJpeg(file);
+const prepareImageFileForUpload = async (file: File) => {
+  assertUploadSize(file);
+
+  if (isHeicImageFile(file)) {
+    const convertedFile = await convertHeicToJpeg(file);
+    assertUploadSize(convertedFile);
+    return convertedFile;
+  }
+
+  const { width, height } = await readImageDimensions(file);
+  assertOriginalImageDimensions(width, height);
+  return file;
 };
 
 const readJsonCache = <T,>(key: string): T | null => {
@@ -582,6 +654,7 @@ const getEmptyClassCounts = () =>
   );
 
 const isFiniteNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
+const isConfidenceScore = (value: unknown): value is number => isFiniteNumber(value) && value >= 0 && value <= 1;
 
 const countDetectionsByClass = (items: Detection[]) =>
   items.reduce((acc, detection) => {
@@ -597,8 +670,25 @@ const normalizeApiCounts = (apiCounts: Record<string, number> | undefined, items
   }, getEmptyClassCounts());
 };
 
-const getAverageConfidence = (items: Detection[]) =>
-  items.length ? items.reduce((total, detection) => total + detection.confidence, 0) / items.length : 0;
+const getConfidenceSummary = (items: Detection[]) => {
+  const scores = items.map((detection) => detection.confidence).filter(isConfidenceScore);
+  if (!scores.length) return { average: null, count: 0 };
+
+  return {
+    average: scores.reduce((total, score) => total + score, 0) / scores.length,
+    count: scores.length
+  };
+};
+
+const getAverageConfidence = (items: Detection[]) => getConfidenceSummary(items).average ?? 0;
+
+const formatConfidencePercent = (value: number | null) =>
+  value === null
+    ? "—"
+    : `${(value * 100).toLocaleString("pt-BR", {
+        minimumFractionDigits: 1,
+        maximumFractionDigits: 1
+      })}%`;
 
 const toKnownClassName = (value: string): ClassName | null => {
   if (value === "folha" || value === "fruto" || value === "marcador_aruco" || value === "planta_inteira") return value;
@@ -1187,7 +1277,7 @@ const exportAnalysisHistoryXlsx = async (items: AnalysisHistoryItem[]) => {
 };
 
 const normalizeInferenceParam = (value: unknown, fallback: number) =>
-  isFiniteNumber(value) && value > 0 && value <= 1 ? value : fallback;
+  isConfidenceScore(value) ? value : fallback;
 
 const analyzeImageRequest = async (form: FormData, params: InferenceParams) => {
   const controller = new AbortController();
@@ -1217,6 +1307,10 @@ const analyzeImageRequest = async (form: FormData, params: InferenceParams) => {
 
 const getAnalyzeErrorMessage = (error: unknown) => {
   const errorMessage = error instanceof Error ? error.message : "";
+  if (error instanceof UploadLimitError) return errorMessage;
+  if (error instanceof ApiResponseError && error.status === 413) {
+    return `413 — A API recusou a imagem. O limite é ${maxUploadMiB} MiB e ${maxOriginalImageMegapixels} MP na imagem original.`;
+  }
   if (errorMessage.includes("converter HEIC")) return errorMessage;
   if (errorMessage.includes("demorou mais de 90s")) return errorMessage;
   return `Não foi possível analisar a imagem. Verifique se a API está acessível em ${API_BASE}.`;
@@ -1243,6 +1337,7 @@ function App() {
   const [modelClassLabels, setModelClassLabels] = useState<string[]>([]);
   const [modelTrainingProgress, setModelTrainingProgress] = useState<{ completed?: number; total?: number }>({});
   const [inferenceParams, setInferenceParams] = useState<InferenceParams>(defaultInferenceParams);
+  const [appliedConfidenceThreshold, setAppliedConfidenceThreshold] = useState<number | null>(null);
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
   const [apiStatus, setApiStatus] = useState<"loading" | "online" | "offline">("loading");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -1329,7 +1424,7 @@ function App() {
 
   const counts = useMemo(() => analysisCounts ?? countDetectionsByClass(detections), [analysisCounts, detections]);
 
-  const confidence = getAverageConfidence(detections);
+  const confidenceSummary = getConfidenceSummary(detections);
   const totalArea = detections.reduce((total, detection) => total + detection.area, 0);
   const visibleDetections = isAnalyzing ? [] : filteredDetections;
   const hasApiAnnotatedImage = Boolean(apiAnnotatedImageSrc);
@@ -1427,17 +1522,18 @@ function App() {
     }
 
     setIsAnalyzing(true);
-    setAnalysisSource("visualizer");
-    setApiAnnotatedImageSrc(null);
-    setDetections([]);
-    setAnalysisCounts(null);
-    setInferenceMeasurements(null);
-    setLatencyMs(null);
-    setMessage(isHeicImageFile(file) ? "Convertendo HEIC para JPG..." : "Enviando imagem para inferência na API do modelo...");
+    setMessage(isHeicImageFile(file) ? "Validando e convertendo HEIC para JPG..." : "Validando imagem antes da inferência...");
 
     try {
       const uploadFile = await prepareImageFileForUpload(file);
       const localPreview = URL.createObjectURL(uploadFile);
+      setAnalysisSource("visualizer");
+      setApiAnnotatedImageSrc(null);
+      setDetections([]);
+      setAnalysisCounts(null);
+      setInferenceMeasurements(null);
+      setLatencyMs(null);
+      setAppliedConfidenceThreshold(null);
       setOriginalImageSrc(localPreview);
       setMessage(`Enviando ${isHeicImageFile(file) ? "JPG convertido" : "imagem"} (${formatFileSize(uploadFile.size)}) para inferência...`);
 
@@ -1447,7 +1543,7 @@ function App() {
       const response = await analyzeImageRequest(form, inferenceParams);
 
       if (!response.ok) {
-        throw new Error(await response.text());
+        throw new ApiResponseError(response.status, await response.text());
       }
 
       const payload = (await response.json()) as AnalyzeResponse;
@@ -1474,6 +1570,9 @@ function App() {
       setAnalysisCounts(nextCounts);
       setInferenceMeasurements(payload.measurements ?? null);
       setLatencyMs(payload.latencyMs);
+      setAppliedConfidenceThreshold(
+        normalizeInferenceParam(payload.thresholds?.confidence, inferenceParams.confidence)
+      );
       setAnalysisModel(getModelDisplayName(payload.model));
       if (typeof payload.model !== "string") {
         const modelDatasetVersion = payload.model.datasetVersion;
@@ -1484,7 +1583,11 @@ function App() {
       addAnalysisHistoryItem(historyItem);
       setMessage(`Inferência concluída em ${(payload.latencyMs / 1000).toFixed(2)}s`);
     } catch (error) {
-      setApiStatus("offline");
+      if (error instanceof ApiResponseError) {
+        setApiStatus("online");
+      } else if (!(error instanceof UploadLimitError)) {
+        setApiStatus("offline");
+      }
       setMessage(getAnalyzeErrorMessage(error));
     } finally {
       setIsAnalyzing(false);
@@ -1562,6 +1665,7 @@ function App() {
               <p className="eyebrow">Antes e depois</p>
               <h2>Segmentação da planta</h2>
               <p className="api-message">{message}</p>
+              <p className="upload-limits">Até 10 MiB • imagem original com até 24 MP</p>
             </div>
             <div className={`upload-actions ${isAnalyzing ? "disabled" : ""}`} aria-label="Selecionar imagem">
               <label className="upload-button camera-action">
@@ -1814,7 +1918,21 @@ function App() {
             <Metric label="Folhas" value={isAnalyzing ? "-" : counts.folha} color={classStyle.folha.color} />
             <Metric label="Frutos" value={isAnalyzing ? "-" : counts.fruto} color={classStyle.fruto.color} />
             <Metric label="Marcadores" value={isAnalyzing ? "-" : counts.marcador_aruco} color={classStyle.marcador_aruco.color} />
-            <Metric label="Confiança" value={isAnalyzing ? "-" : `${Math.round(confidence * 100)}%`} color="#69c8ff" />
+            <Metric
+              label="Confiança média"
+              value={isAnalyzing ? "—" : formatConfidencePercent(confidenceSummary.average)}
+              color="#69c8ff"
+              detail={
+                isAnalyzing
+                  ? "Processando"
+                  : confidenceSummary.count
+                    ? `${confidenceSummary.count} detecções · corte ${formatConfidencePercent(
+                        appliedConfidenceThreshold ?? inferenceParams.confidence
+                      )}`
+                    : "Nenhuma detecção"
+              }
+              title="Média aritmética dos escores de confiança das detecções retornadas pela API."
+            />
             <Metric label="Área seg." value={isAnalyzing ? "-" : `${totalArea.toFixed(1)}%`} color="#f2d66d" />
           </div>
 
@@ -2174,7 +2292,7 @@ function toTrainingMetric(item: ApiTrainingMetric): TrainingMetric {
 
 function toDetection(item: ApiDetection): Detection | null {
   const className = toKnownClassName(item.className);
-  if (!className) return null;
+  if (!className || !isConfidenceScore(item.confidence)) return null;
   const area = item.area ?? item.size?.imagePercent?.area ?? (item.bbox.w * item.bbox.h) / 100;
 
   return {
@@ -2219,7 +2337,7 @@ function DetectionLayer({ detection, mode }: { detection: Detection; mode: ViewM
             height: `${detection.bbox.h}%`
           }}
         >
-          <span>{Math.round(detection.confidence * 100)}%</span>
+          <span>{formatConfidencePercent(detection.confidence)}</span>
         </div>
       )}
     </div>
@@ -2302,11 +2420,24 @@ function clampPan(pan: Pan, zoom: number, surface: React.CSSProperties): Pan {
   };
 }
 
-function Metric({ label, value, color }: { label: string; value: string | number; color: string }) {
+function Metric({
+  label,
+  value,
+  color,
+  detail,
+  title
+}: {
+  label: string;
+  value: string | number;
+  color: string;
+  detail?: string;
+  title?: string;
+}) {
   return (
-    <div className="metric-card" style={{ "--accent": color } as React.CSSProperties}>
+    <div className="metric-card" style={{ "--accent": color } as React.CSSProperties} title={title}>
       <span>{label}</span>
       <strong>{value}</strong>
+      {detail && <small>{detail}</small>}
     </div>
   );
 }
@@ -2439,7 +2570,7 @@ function InstanceRow({ detection }: { detection: Detection }) {
         <span style={{ background: theme.color }} />
         {theme.label}
       </div>
-      <strong>{Math.round(detection.confidence * 100)}%</strong>
+      <strong>{formatConfidencePercent(detection.confidence)}</strong>
       <small className="instance-details">
         {realWidth && <span>Real: {realWidth} × {realHeight} · área {realArea}</span>}
         {relativeWidth && <span>Imagem: {relativeWidth} × {relativeHeight} · área {relativeArea}</span>}
