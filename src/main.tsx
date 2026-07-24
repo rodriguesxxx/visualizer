@@ -219,6 +219,11 @@ type ApiModelInfo = {
     defaultConfidence?: number;
     defaultIou?: number;
     runtime?: { name?: string; device?: string; imgsz?: number; maxDetections?: number };
+    aruco?: {
+      dictionary?: string;
+      markerSizeMm?: number | null;
+      calibrationEnv?: string;
+    };
     pipeline?: string;
     topLevelClasses?: string[];
     childClasses?: string[];
@@ -254,17 +259,29 @@ type InferenceParams = {
   iou: number;
 };
 
+type PreparedImage = {
+  file: File;
+  originalWidth: number;
+  originalHeight: number;
+  optimized: boolean;
+};
+
 const viteEnv = (import.meta as unknown as { env?: { BASE_URL?: string; VITE_MODEL_API_URL?: string } }).env;
 const appBaseUrl = viteEnv?.BASE_URL ?? "/";
 const publicAssetBaseUrl = appBaseUrl.endsWith("/") ? appBaseUrl : `${appBaseUrl}/`;
 const API_BASE = (viteEnv?.VITE_MODEL_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
 const defaultInferenceParams: InferenceParams = { confidence: 0.25, iou: 0.7 };
 const inferenceTimeoutMs = 90_000;
-const maxUploadMiB = 10;
-const maxUploadBytes = maxUploadMiB * 1024 * 1024;
-const maxOriginalImageMegapixels = 24;
-const maxOriginalImagePixels = maxOriginalImageMegapixels * 1_000_000;
+const maxSourceUploadMiB = 20;
+const maxSourceUploadBytes = maxSourceUploadMiB * 1024 * 1024;
+const maxInferenceUploadMiB = 10;
+const maxInferenceUploadBytes = maxInferenceUploadMiB * 1024 * 1024;
+const maxSourceImageMegapixels = 60;
+const maxSourceImagePixels = maxSourceImageMegapixels * 1_000_000;
+const maxInferenceImageMegapixels = 24;
+const maxInferenceImagePixels = maxInferenceImageMegapixels * 1_000_000;
 const maxConvertedImageSide = 1280;
+const maxOptimizedImageSide = 4096;
 const jpegQuality = 0.82;
 const apiCacheTtlMs = 12 * 60 * 60 * 1000;
 const apiCachePrefix = "plant-ai-api-cache";
@@ -436,7 +453,10 @@ const isHeicImageFile = (file: File) => {
   return file.type === "image/heic" || file.type === "image/heif" || heicExtensions.some((extension) => filename.endsWith(extension));
 };
 
-const getJpegFilename = (filename: string) => filename.replace(/\.(heic|heif)$/i, ".jpg") || "imagem.jpg";
+const getJpegFilename = (filename: string) => {
+  const basename = filename.replace(/\.[^.]+$/, "");
+  return `${basename || "imagem"}.jpg`;
+};
 
 const loadImageElement = (url: string) =>
   new Promise<HTMLImageElement>((resolve, reject) => {
@@ -446,21 +466,26 @@ const loadImageElement = (url: string) =>
     image.src = url;
   });
 
-const assertUploadSize = (file: File) => {
-  if (file.size <= maxUploadBytes) return;
-  throw new UploadLimitError(`a imagem excede o limite de ${maxUploadMiB} MiB.`);
+const assertSourceUploadSize = (file: File) => {
+  if (file.size <= maxSourceUploadBytes) return;
+  throw new UploadLimitError(`a imagem original excede o limite de ${maxSourceUploadMiB} MiB.`);
 };
 
-const assertOriginalImageDimensions = (width: number, height: number) => {
+const assertInferenceUploadSize = (file: File) => {
+  if (file.size <= maxInferenceUploadBytes) return;
+  throw new UploadLimitError(`não foi possível reduzir a imagem para ${maxInferenceUploadMiB} MiB.`);
+};
+
+const assertSourceImageDimensions = (width: number, height: number) => {
   const pixels = width * height;
-  if (pixels <= maxOriginalImagePixels) return;
+  if (pixels <= maxSourceImagePixels) return;
 
   const megapixels = (pixels / 1_000_000).toLocaleString("pt-BR", {
     minimumFractionDigits: 1,
     maximumFractionDigits: 1
   });
   throw new UploadLimitError(
-    `a imagem original tem ${megapixels} MP e excede o limite de ${maxOriginalImageMegapixels} MP.`
+    `a imagem original tem ${megapixels} MP e excede o limite de ${maxSourceImageMegapixels} MP.`
   );
 };
 
@@ -483,7 +508,7 @@ const readImageDimensions = async (blob: Blob) => {
   }
 };
 
-const canvasToJpegBlob = (canvas: HTMLCanvasElement) =>
+const canvasToJpegBlob = (canvas: HTMLCanvasElement, quality = jpegQuality) =>
   new Promise<Blob>((resolve, reject) => {
     canvas.toBlob(
       (blob) => {
@@ -495,11 +520,11 @@ const canvasToJpegBlob = (canvas: HTMLCanvasElement) =>
         reject(new Error("Não foi possível gerar o JPG convertido."));
       },
       "image/jpeg",
-      jpegQuality
+      quality
     );
   });
 
-const normalizeJpegBlob = async (blob: Blob, filename: string) => {
+const encodeImageBlobForUpload = async (blob: Blob, filename: string, maximumSide: number): Promise<PreparedImage> => {
   let source: ImageBitmap | HTMLImageElement | null = null;
   let objectUrl: string | null = null;
 
@@ -511,18 +536,50 @@ const normalizeJpegBlob = async (blob: Blob, filename: string) => {
       source = await loadImageElement(objectUrl);
     }
 
-    assertOriginalImageDimensions(source.width, source.height);
-    const scale = Math.min(1, maxConvertedImageSide / Math.max(source.width, source.height));
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, Math.round(source.width * scale));
-    canvas.height = Math.max(1, Math.round(source.height * scale));
+    const originalWidth = source.width;
+    const originalHeight = source.height;
+    assertSourceImageDimensions(originalWidth, originalHeight);
+    const sideScale = Math.min(1, maximumSide / Math.max(originalWidth, originalHeight));
+    const pixelScale = Math.min(1, Math.sqrt(maxInferenceImagePixels / (originalWidth * originalHeight)));
+    const initialScale = Math.min(sideScale, pixelScale);
+    let width = Math.max(1, Math.round(source.width * initialScale));
+    let height = Math.max(1, Math.round(source.height * initialScale));
+    let quality = jpegQuality;
 
-    const context = canvas.getContext("2d");
-    if (!context) throw new Error("Não foi possível preparar o JPG convertido.");
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
 
-    context.drawImage(source, 0, 0, canvas.width, canvas.height);
-    const jpegBlob = await canvasToJpegBlob(canvas);
-    return new File([jpegBlob], filename, { type: "image/jpeg" });
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("Não foi possível preparar o JPG convertido.");
+
+      context.fillStyle = "#ffffff";
+      context.fillRect(0, 0, width, height);
+      context.drawImage(source, 0, 0, width, height);
+
+      const jpegBlob = await canvasToJpegBlob(canvas, quality);
+      if (jpegBlob.size <= maxInferenceUploadBytes) {
+        return {
+          file: new File([jpegBlob], filename, { type: "image/jpeg" }),
+          originalWidth,
+          originalHeight,
+          optimized: true
+        };
+      }
+
+      if (quality > 0.55) {
+        quality = Math.max(0.55, quality - 0.09);
+        continue;
+      }
+
+      const sizeScale = Math.min(0.9, Math.sqrt(maxInferenceUploadBytes / jpegBlob.size) * 0.92);
+      width = Math.max(1, Math.round(width * sizeScale));
+      height = Math.max(1, Math.round(height * sizeScale));
+      quality = jpegQuality;
+    }
+
+    throw new UploadLimitError(`não foi possível reduzir a imagem para ${maxInferenceUploadMiB} MiB.`);
   } finally {
     if (source && "close" in source && typeof source.close === "function") source.close();
     if (objectUrl) URL.revokeObjectURL(objectUrl);
@@ -535,7 +592,7 @@ const convertHeicToJpeg = async (file: File) => {
     const result = await heic2any({ blob: file, toType: "image/jpeg", quality: jpegQuality });
     const jpegBlob = Array.isArray(result) ? result[0] : result;
     if (!jpegBlob) throw new Error("HEIC sem imagem válida.");
-    return normalizeJpegBlob(jpegBlob, getJpegFilename(file.name));
+    return encodeImageBlobForUpload(jpegBlob, getJpegFilename(file.name), maxConvertedImageSide);
   } catch (error) {
     if (error instanceof UploadLimitError) throw error;
     throw new Error("Não foi possível converter HEIC para JPG.");
@@ -543,17 +600,30 @@ const convertHeicToJpeg = async (file: File) => {
 };
 
 const prepareImageFileForUpload = async (file: File) => {
-  assertUploadSize(file);
+  assertSourceUploadSize(file);
 
   if (isHeicImageFile(file)) {
-    const convertedFile = await convertHeicToJpeg(file);
-    assertUploadSize(convertedFile);
-    return convertedFile;
+    const convertedImage = await convertHeicToJpeg(file);
+    assertInferenceUploadSize(convertedImage.file);
+    return convertedImage;
   }
 
   const { width, height } = await readImageDimensions(file);
-  assertOriginalImageDimensions(width, height);
-  return file;
+  assertSourceImageDimensions(width, height);
+  const shouldOptimize = file.size > maxInferenceUploadBytes || width * height > maxInferenceImagePixels;
+
+  if (!shouldOptimize) {
+    return {
+      file,
+      originalWidth: width,
+      originalHeight: height,
+      optimized: false
+    };
+  }
+
+  const optimizedImage = await encodeImageBlobForUpload(file, getJpegFilename(file.name), maxOptimizedImageSide);
+  assertInferenceUploadSize(optimizedImage.file);
+  return optimizedImage;
 };
 
 const readJsonCache = <T,>(key: string): T | null => {
@@ -689,6 +759,107 @@ const formatConfidencePercent = (value: number | null) =>
         minimumFractionDigits: 1,
         maximumFractionDigits: 1
       })}%`;
+
+const parseMarkerSizeMm = (value: string) => {
+  if (!value.trim()) return null;
+  const markerSizeMm = Number(value.replace(",", "."));
+  return isFiniteNumber(markerSizeMm) && markerSizeMm > 0 && markerSizeMm <= 1000 ? markerSizeMm : null;
+};
+
+const calibrateDetectionSize = (size: Detection["size"], mmPerPixel: number) => {
+  if (!size?.pixel) return size;
+  const { width, height, area } = size.pixel;
+  return {
+    ...size,
+    real: {
+      unit: "mm",
+      width: isFiniteNumber(width) ? width * mmPerPixel : undefined,
+      height: isFiniteNumber(height) ? height * mmPerPixel : undefined,
+      areaMm2: isFiniteNumber(area) ? area * mmPerPixel * mmPerPixel : undefined
+    }
+  };
+};
+
+const calibrateHeightMeasurement = (measurement: HeightMeasurement | undefined, mmPerPixel: number) => {
+  if (!measurement?.pixel) return measurement;
+  return {
+    ...measurement,
+    calibrated: true,
+    real: {
+      unit: "mm",
+      average: isFiniteNumber(measurement.pixel.average) ? measurement.pixel.average * mmPerPixel : undefined,
+      max: isFiniteNumber(measurement.pixel.max) ? measurement.pixel.max * mmPerPixel : undefined
+    }
+  };
+};
+
+const calibrateSizeMeasurement = (measurement: SizeMeasurement | undefined, mmPerPixel: number) => {
+  if (!measurement?.pixel) return measurement;
+  return {
+    ...measurement,
+    calibrated: true,
+    real: {
+      unit: "mm",
+      averageWidth: isFiniteNumber(measurement.pixel.averageWidth)
+        ? measurement.pixel.averageWidth * mmPerPixel
+        : undefined,
+      averageHeight: isFiniteNumber(measurement.pixel.averageHeight)
+        ? measurement.pixel.averageHeight * mmPerPixel
+        : undefined,
+      averageAreaMm2: isFiniteNumber(measurement.pixel.averageArea)
+        ? measurement.pixel.averageArea * mmPerPixel * mmPerPixel
+        : undefined
+    }
+  };
+};
+
+const applyMarkerCalibration = (
+  detections: Detection[],
+  measurements: InferenceMeasurements | undefined,
+  markerSizeMm: number | null
+) => {
+  if (!markerSizeMm || !measurements?.scale) return { detections, measurements };
+
+  const markerSidePixels = isFiniteNumber(measurements.scale.medianSidePixels)
+    ? measurements.scale.medianSidePixels
+    : measurements.scale.averageSidePixels;
+
+  if (!isFiniteNumber(markerSidePixels) || markerSidePixels <= 0) {
+    return {
+      detections,
+      measurements: {
+        ...measurements,
+        scale: {
+          ...measurements.scale,
+          calibrated: false,
+          configuredMarkerSizeMm: markerSizeMm
+        }
+      }
+    };
+  }
+
+  const mmPerPixel = markerSizeMm / markerSidePixels;
+  return {
+    detections: detections.map((detection) => ({
+      ...detection,
+      size: calibrateDetectionSize(detection.size, mmPerPixel)
+    })),
+    measurements: {
+      ...measurements,
+      scale: {
+        ...measurements.scale,
+        calibrated: true,
+        reason: undefined,
+        configuredMarkerSizeMm: markerSizeMm,
+        mmPerPixel,
+        pixelsPerMm: 1 / mmPerPixel
+      },
+      plantHeight: calibrateHeightMeasurement(measurements.plantHeight, mmPerPixel),
+      fruitSize: calibrateSizeMeasurement(measurements.fruitSize, mmPerPixel),
+      leafSize: calibrateSizeMeasurement(measurements.leafSize, mmPerPixel)
+    }
+  };
+};
 
 const toKnownClassName = (value: string): ClassName | null => {
   if (value === "folha" || value === "fruto" || value === "marcador_aruco" || value === "planta_inteira") return value;
@@ -1309,7 +1480,7 @@ const getAnalyzeErrorMessage = (error: unknown) => {
   const errorMessage = error instanceof Error ? error.message : "";
   if (error instanceof UploadLimitError) return errorMessage;
   if (error instanceof ApiResponseError && error.status === 413) {
-    return `413 — A API recusou a imagem. O limite é ${maxUploadMiB} MiB e ${maxOriginalImageMegapixels} MP na imagem original.`;
+    return `413 — A API recusou a imagem após a otimização. Use um original de até ${maxSourceUploadMiB} MiB e ${maxSourceImageMegapixels} MP.`;
   }
   if (errorMessage.includes("converter HEIC")) return errorMessage;
   if (errorMessage.includes("demorou mais de 90s")) return errorMessage;
@@ -1337,6 +1508,7 @@ function App() {
   const [modelClassLabels, setModelClassLabels] = useState<string[]>([]);
   const [modelTrainingProgress, setModelTrainingProgress] = useState<{ completed?: number; total?: number }>({});
   const [inferenceParams, setInferenceParams] = useState<InferenceParams>(defaultInferenceParams);
+  const [markerSizeInput, setMarkerSizeInput] = useState("");
   const [appliedConfidenceThreshold, setAppliedConfidenceThreshold] = useState<number | null>(null);
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
   const [apiStatus, setApiStatus] = useState<"loading" | "online" | "offline">("loading");
@@ -1377,6 +1549,9 @@ function App() {
           confidence: normalizeInferenceParam(info.inference?.defaultConfidence, defaultInferenceParams.confidence),
           iou: normalizeInferenceParam(info.inference?.defaultIou, defaultInferenceParams.iou)
         });
+        if (isFiniteNumber(info.inference?.aruco?.markerSizeMm) && info.inference.aruco.markerSizeMm > 0) {
+          setMarkerSizeInput(String(info.inference.aruco.markerSizeMm));
+        }
         finalMetric = info.training?.finalMetrics ? toTrainingMetric(info.training.finalMetrics) : null;
         hasApiData = true;
       }
@@ -1522,10 +1697,17 @@ function App() {
     }
 
     setIsAnalyzing(true);
-    setMessage(isHeicImageFile(file) ? "Validando e convertendo HEIC para JPG..." : "Validando imagem antes da inferência...");
+    setMessage(
+      isHeicImageFile(file)
+        ? "Validando e convertendo HEIC para JPG..."
+        : file.size > maxInferenceUploadBytes
+          ? `Validando e reduzindo a imagem para até ${maxInferenceUploadMiB} MiB...`
+          : "Validando imagem antes da inferência..."
+    );
 
     try {
-      const uploadFile = await prepareImageFileForUpload(file);
+      const preparedImage = await prepareImageFileForUpload(file);
+      const uploadFile = preparedImage.file;
       const localPreview = URL.createObjectURL(uploadFile);
       setAnalysisSource("visualizer");
       setApiAnnotatedImageSrc(null);
@@ -1535,7 +1717,10 @@ function App() {
       setLatencyMs(null);
       setAppliedConfidenceThreshold(null);
       setOriginalImageSrc(localPreview);
-      setMessage(`Enviando ${isHeicImageFile(file) ? "JPG convertido" : "imagem"} (${formatFileSize(uploadFile.size)}) para inferência...`);
+      setMessage(
+        `Enviando ${isHeicImageFile(file) ? "JPG convertido" : preparedImage.optimized ? "imagem otimizada" : "imagem"} ` +
+          `(${formatFileSize(uploadFile.size)}) para inferência...`
+      );
 
       const form = new FormData();
       form.append("file", uploadFile, uploadFile.name);
@@ -1547,7 +1732,11 @@ function App() {
       }
 
       const payload = (await response.json()) as AnalyzeResponse;
-      const nextDetections = payload.detections.map(toDetection).filter(Boolean) as Detection[];
+      const apiDetections = payload.detections.map(toDetection).filter(Boolean) as Detection[];
+      const markerSizeMm = parseMarkerSizeMm(markerSizeInput);
+      const calibratedResult = applyMarkerCalibration(apiDetections, payload.measurements, markerSizeMm);
+      const nextDetections = calibratedResult.detections;
+      const nextMeasurements = calibratedResult.measurements;
       const nextCounts = normalizeApiCounts(payload.counts, nextDetections);
       const inferenceDatasetVersion = typeof payload.model === "string" ? datasetVersion ?? undefined : payload.model.datasetVersion;
       const historyItem = createAnalysisHistoryItem({
@@ -1558,8 +1747,12 @@ function App() {
         datasetVersion: inferenceDatasetVersion,
         trainingMetric: lastMetric,
         latencyMs: payload.latencyMs,
-        image: payload.image,
-        measurements: payload.measurements
+        image: {
+          ...payload.image,
+          originalWidth: preparedImage.originalWidth,
+          originalHeight: preparedImage.originalHeight
+        },
+        measurements: nextMeasurements
       });
 
       const originalDataUrl = payload.image.originalDataUrl ?? localPreview;
@@ -1568,7 +1761,7 @@ function App() {
       if (payload.image.width && payload.image.height) setImageAspect(payload.image.width / payload.image.height);
       setDetections(nextDetections);
       setAnalysisCounts(nextCounts);
-      setInferenceMeasurements(payload.measurements ?? null);
+      setInferenceMeasurements(nextMeasurements ?? null);
       setLatencyMs(payload.latencyMs);
       setAppliedConfidenceThreshold(
         normalizeInferenceParam(payload.thresholds?.confidence, inferenceParams.confidence)
@@ -1581,7 +1774,12 @@ function App() {
       }
       setApiStatus("online");
       addAnalysisHistoryItem(historyItem);
-      setMessage(`Inferência concluída em ${(payload.latencyMs / 1000).toFixed(2)}s`);
+      setMessage(
+        `Inferência concluída em ${(payload.latencyMs / 1000).toFixed(2)}s` +
+          (nextMeasurements?.scale?.calibrated && markerSizeMm
+            ? ` • medições calibradas com marcador de ${markerSizeMm.toLocaleString("pt-BR")} mm`
+            : "")
+      );
     } catch (error) {
       if (error instanceof ApiResponseError) {
         setApiStatus("online");
@@ -1665,7 +1863,9 @@ function App() {
               <p className="eyebrow">Antes e depois</p>
               <h2>Segmentação da planta</h2>
               <p className="api-message">{message}</p>
-              <p className="upload-limits">Até 10 MiB • imagem original com até 24 MP</p>
+              <p className="upload-limits">
+                Original até 20 MiB e 60 MP • envio otimizado para até 10 MiB e 24 MP
+              </p>
             </div>
             <div className={`upload-actions ${isAnalyzing ? "disabled" : ""}`} aria-label="Selecionar imagem">
               <label className="upload-button camera-action">
@@ -1812,6 +2012,17 @@ function App() {
               value={selectedClass}
               options={classFilterOptions}
               onChange={setSelectedClass}
+            />
+            <InferenceParameterSelector
+              disabled={isAnalyzing}
+              markerSizeInput={markerSizeInput}
+              params={inferenceParams}
+              onMarkerSizeChange={setMarkerSizeInput}
+              onParamsChange={setInferenceParams}
+              onReset={() => {
+                setInferenceParams(defaultInferenceParams);
+                setMarkerSizeInput("");
+              }}
             />
           </div>
           </article>
@@ -1964,6 +2175,124 @@ function App() {
         </aside>
       </section>
     </main>
+  );
+}
+
+function InferenceParameterSelector({
+  params,
+  markerSizeInput,
+  disabled,
+  onParamsChange,
+  onMarkerSizeChange,
+  onReset
+}: {
+  params: InferenceParams;
+  markerSizeInput: string;
+  disabled: boolean;
+  onParamsChange: (params: InferenceParams) => void;
+  onMarkerSizeChange: (value: string) => void;
+  onReset: () => void;
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const markerSizeMm = parseMarkerSizeMm(markerSizeInput);
+  const hasInvalidMarkerSize = Boolean(markerSizeInput.trim()) && markerSizeMm === null;
+
+  return (
+    <div className={`inference-parameters ${isOpen ? "is-open" : ""}`}>
+      <button
+        aria-controls="inference-parameters-panel"
+        aria-expanded={isOpen}
+        className="parameters-toggle"
+        onClick={() => setIsOpen((current) => !current)}
+        type="button"
+      >
+        <SlidersVertical size={16} />
+        Parâmetros
+        <span>
+          {formatConfidencePercent(params.confidence)} · IoU {formatConfidencePercent(params.iou)}
+        </span>
+      </button>
+
+      {isOpen && (
+        <div className="parameters-panel" id="inference-parameters-panel">
+          <div className="parameters-heading">
+            <div>
+              <strong>Parâmetros da próxima inferência</strong>
+              <span>Os ajustes são aplicados no próximo upload.</span>
+            </div>
+            <button disabled={disabled} onClick={onReset} type="button">
+              Restaurar padrão
+            </button>
+          </div>
+
+          <div className="parameters-grid">
+            <label className="parameter-field">
+              <span>
+                Confiança mínima
+                <output>{formatConfidencePercent(params.confidence)}</output>
+              </span>
+              <input
+                disabled={disabled}
+                max={1}
+                min={0}
+                onChange={(event) =>
+                  onParamsChange({ ...params, confidence: normalizeInferenceParam(Number(event.target.value), params.confidence) })
+                }
+                step={0.05}
+                type="range"
+                value={params.confidence}
+              />
+              <small>Descarta detecções com escore abaixo do valor escolhido.</small>
+            </label>
+
+            <label className="parameter-field">
+              <span>
+                IoU
+                <output>{formatConfidencePercent(params.iou)}</output>
+              </span>
+              <input
+                disabled={disabled}
+                max={1}
+                min={0}
+                onChange={(event) =>
+                  onParamsChange({ ...params, iou: normalizeInferenceParam(Number(event.target.value), params.iou) })
+                }
+                step={0.05}
+                type="range"
+                value={params.iou}
+              />
+              <small>Controla quanto as detecções podem se sobrepor.</small>
+            </label>
+
+            <label className={`parameter-field marker-size-field ${hasInvalidMarkerSize ? "invalid" : ""}`}>
+              <span>
+                Lado do marcador ArUco
+                <output>{markerSizeMm ? `${markerSizeMm.toLocaleString("pt-BR")} mm` : "Relativa"}</output>
+              </span>
+              <div className="number-with-unit">
+                <input
+                  disabled={disabled}
+                  inputMode="decimal"
+                  max={1000}
+                  min={0.1}
+                  onChange={(event) => onMarkerSizeChange(event.target.value)}
+                  placeholder="Ex.: 50"
+                  step={0.1}
+                  type="number"
+                  value={markerSizeInput}
+                />
+                <span>mm</span>
+              </div>
+              <small>
+                {hasInvalidMarkerSize
+                  ? "Informe um valor entre 0,1 e 1.000 mm."
+                  : "Converte pixels em medidas reais quando um marcador é detectado."}
+              </small>
+            </label>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
